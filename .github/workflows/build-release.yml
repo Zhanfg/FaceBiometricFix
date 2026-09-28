@@ -111,7 +111,11 @@ jobs:
           set -euo pipefail
           : "${GH_TOKEN:?XPOSED_REPO_TOKEN is not configured}"
           target_dir="$RUNNER_TEMP/xposed-repository"
-          gh repo clone "$TARGET_REPOSITORY" "$target_dir"
+          git -c "http.https://github.com/.extraheader=Authorization: Bearer $GH_TOKEN" \
+            clone "https://github.com/$TARGET_REPOSITORY.git" "$target_dir"
+          # Persist credentials inside the cloned repo for subsequent git operations (push).
+          git -C "$target_dir" config http.https://github.com/.extraheader \
+            "Authorization: Bearer $GH_TOKEN"
           # README.md is the shared source; the Xposed repository keeps its own
           # SUMMARY/SCOPE/SOURCE_URL metadata because the nested checkout is ignored.
           cp README.md LICENSE "$target_dir/"
