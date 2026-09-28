@@ -19,8 +19,8 @@ android {
         applicationId = "com.way.facebiometricfix"
         minSdk = 35
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "2.0"
 
     }
 
@@ -48,5 +48,5 @@ android {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    compileOnly("io.github.libxposed:api:102.0.0")
 }

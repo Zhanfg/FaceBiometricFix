@@ -1,2 +1,6 @@
-# The Xposed loader instantiates this class from assets/xposed_init.
--keep class com.way.facebiometricfix.MainHook { *; }
+# The libxposed loader instantiates this class from META-INF/xposed/java_init.list.
+-dontwarn io.github.libxposed.annotation.**
+-keep,allowoptimization public class com.way.facebiometricfix.MainHook {
+    public <init>();
+}
+
