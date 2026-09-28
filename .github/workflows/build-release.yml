@@ -113,11 +113,11 @@ jobs:
           set -euo pipefail
           : "${GH_TOKEN:?XPOSED_REPO_TOKEN is not configured}"
           target_dir="$RUNNER_TEMP/xposed-repository"
-          git -c "http.https://github.com/.extraheader=Authorization: Bearer $GH_TOKEN" \
-            clone "https://github.com/$TARGET_REPOSITORY.git" "$target_dir"
-          # Persist credentials inside the cloned repo for subsequent git operations (push).
-          git -C "$target_dir" config http.https://github.com/.extraheader \
-            "Authorization: Bearer $GH_TOKEN"
+          # Embed token in URL so Actions secret masking cannot break the credential.
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_REPOSITORY.git" "$target_dir"
+          # Replace remote URL with a token-authenticated one for push as well.
+          git -C "$target_dir" remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_REPOSITORY.git"
           # README.md is the shared source; the Xposed repository keeps its own
           # SUMMARY/SCOPE/SOURCE_URL metadata because the nested checkout is ignored.
           cp README.md LICENSE "$target_dir/"
