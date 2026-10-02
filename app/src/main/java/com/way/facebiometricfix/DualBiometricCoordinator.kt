@@ -9,17 +9,16 @@ import java.lang.reflect.Method
 import java.util.WeakHashMap
 
 /**
- * Sequential FACE -> FINGERPRINT orchestration for one AuthSession.
+ * Order-independent 2-of-2 biometric orchestration for one AuthSession.
  *
- * Recovery model:
- * - FACE success is consumed and never becomes the final framework success.
- * - FACE is stopped after stage 1; its later CANCELED callback is absorbed safely.
- * - FINGERPRINT start failures fail closed and force-cancel the session.
- * - FINGERPRINT framework timeout closes the current session instead of leaving it paused/stuck.
- * - FACE -> FINGERPRINT has a bounded deadline so an abandoned prompt cannot live forever.
- * - Every terminal/cancel/dismiss/client-death path invalidates delayed work.
+ * FACE and FINGERPRINT may succeed in either order. The first factor is retained
+ * only inside this short-lived session; the second factor completes the Android
+ * AuthSession. When fingerprint is first, its real HAT is replayed as the final
+ * framework success after FACE succeeds, preserving the strong-token path.
  *
- * Hot paths are event-driven. The only delayed work is one bounded stage-deadline Runnable.
+ * FACE capture windows are transparently re-armed instead of becoming unusable
+ * after the OEM timeout. Hot paths are event-driven; only one bounded
+ * second-factor deadline Runnable exists per session.
  */
 internal class DualBiometricCoordinator(
     private val logInfo: (String) -> Unit,
@@ -27,9 +26,17 @@ internal class DualBiometricCoordinator(
     private val logError: (String, Throwable) -> Unit,
 ) {
     enum class SuccessDecision {
-        PROCEED,
+        PROCEED_CURRENT,
+        PROCEED_STORED_FINGERPRINT,
         CONSUME,
     }
+
+    data class SuccessAction(
+        val decision: SuccessDecision,
+        val sensorId: Int = -1,
+        val strong: Boolean = false,
+        val token: ByteArray? = null,
+    )
 
     enum class ErrorDecision {
         PROCEED,
@@ -37,6 +44,7 @@ internal class DualBiometricCoordinator(
     }
 
     private enum class Phase {
+        WAIT_BOTH,
         WAIT_FACE,
         WAIT_FINGERPRINT,
         COMPLETE,
@@ -46,13 +54,17 @@ internal class DualBiometricCoordinator(
 
     private data class SessionState(
         val packageName: String,
-        var phase: Phase = Phase.WAIT_FACE,
+        var phase: Phase = Phase.WAIT_BOTH,
         var uiReady: Boolean = false,
-        var fingerprintStartRequested: Boolean = false,
-        var faceStopRequested: Boolean = false,
+        var verifiedMask: Int = 0,
+        var fingerprintSensorId: Int = -1,
+        var fingerprintStrong: Boolean = false,
+        var fingerprintToken: ByteArray? = null,
+        var faceRestartPending: Boolean = false,
         var abortPosted: Boolean = false,
         var deadlineAtElapsedMs: Long = 0L,
         var deadlineRunnable: Runnable? = null,
+        var lastGuidance: String? = null,
     )
 
     private data class Handles(
@@ -61,14 +73,12 @@ internal class DualBiometricCoordinator(
         val preAuthInfo: Field?,
         val getEligibleModalities: Method?,
         val sensorIdToModality: Method?,
-        val onStartFingerprint: Method?,
-        val startFingerprintSensorsNow: Method?,
-        val startAllPreparedFingerprintSensors: Method?,
         val pauseSensorIfSupported: Method?,
+        val onTryAgainPressed: Method?,
         val onCancelAuthSession: Method?,
         val cancelAllSensors: Method?,
+        val statusBarService: Field?,
     )
-
     private val sessions = WeakHashMap<Any, SessionState>()
     private val handler = Handler(Looper.getMainLooper())
 
@@ -99,65 +109,116 @@ internal class DualBiometricCoordinator(
     @Volatile
     private var cachedSensorStopMethod: Method? = null
 
+    @Volatile
+    private var cachedSensorCookieClass: Class<*>? = null
+
+    @Volatile
+    private var cachedSensorCookieMethod: Method? = null
+
+    @Volatile
+    private var cachedStatusBarClass: Class<*>? = null
+
+    @Volatile
+    private var cachedStatusBarHelp: Method? = null
+
     fun prepare(session: Any?): Boolean {
         if (session == null) return false
         return getOrCreateState(session) != null
     }
 
-    fun shouldDelayFingerprint(session: Any?): Boolean {
+    fun shouldForceFingerprintStart(session: Any?): Boolean {
         if (session == null) return false
         val state = getOrCreateState(session) ?: return false
         synchronized(state) {
             return state.phase != Phase.COMPLETE &&
                 state.phase != Phase.ABORTING &&
-                state.phase != Phase.TERMINATED &&
-                !state.fingerprintStartRequested
-        }
-    }
-
-    fun shouldBlockFingerprintStart(session: Any?): Boolean {
-        if (session == null) return false
-        val state = getOrCreateState(session) ?: return false
-        synchronized(state) {
-            return when (state.phase) {
-                Phase.WAIT_FACE -> true
-                Phase.WAIT_FINGERPRINT -> !state.uiReady
-                Phase.COMPLETE, Phase.ABORTING, Phase.TERMINATED -> false
-            }
+                state.phase != Phase.TERMINATED
         }
     }
 
     fun onDialogAnimatedIn(session: Any?) {
         if (session == null) return
         val state = getOrCreateState(session) ?: return
-
-        val shouldAdvance = synchronized(state) {
-            if (state.phase == Phase.ABORTING || state.phase == Phase.TERMINATED) {
-                false
-            } else {
-                state.uiReady = true
-                state.phase == Phase.WAIT_FINGERPRINT
-            }
+        synchronized(state) {
+            if (state.phase == Phase.ABORTING || state.phase == Phase.TERMINATED) return
+            state.uiReady = true
         }
-
-        if (shouldAdvance) {
-            advanceFingerprintStage(session, state)
-        }
+        sendGuidanceForCurrentState(session, state)
     }
 
-    fun onAuthenticationSucceeded(session: Any?, sensorId: Int): SuccessDecision {
-        if (session == null) return SuccessDecision.PROCEED
-
-        val state = getOrCreateState(session) ?: return SuccessDecision.PROCEED
+    fun onAuthenticationSucceeded(
+        session: Any?,
+        sensorId: Int,
+        strong: Boolean,
+        token: ByteArray?,
+    ): SuccessAction {
+        if (session == null) return SuccessAction(SuccessDecision.PROCEED_CURRENT)
+        val state = getOrCreateState(session)
+            ?: return SuccessAction(SuccessDecision.PROCEED_CURRENT)
         val modality = sensorModality(session, sensorId)
-
-        return when (modality) {
-            TYPE_FACE -> onFaceSucceeded(session, state, sensorId)
-            TYPE_FINGERPRINT -> onFingerprintSucceeded(state)
-            else -> SuccessDecision.PROCEED
+        if (modality != TYPE_FACE && modality != TYPE_FINGERPRINT) {
+            return SuccessAction(SuccessDecision.PROCEED_CURRENT)
         }
-    }
 
+        synchronized(state) {
+            if (state.phase == Phase.ABORTING || state.phase == Phase.TERMINATED) {
+                return SuccessAction(SuccessDecision.CONSUME)
+            }
+
+            val bit = if (modality == TYPE_FACE) VERIFIED_FACE else VERIFIED_FINGERPRINT
+            if (state.verifiedMask and bit != 0) {
+                return SuccessAction(SuccessDecision.CONSUME)
+            }
+            state.verifiedMask = state.verifiedMask or bit
+
+            if (modality == TYPE_FINGERPRINT) {
+                state.fingerprintToken?.fill(0)
+                state.fingerprintSensorId = sensorId
+                state.fingerprintStrong = strong
+                state.fingerprintToken = token?.clone()
+            }
+
+            markSuccessfulSensorStopped(session, sensorId)
+
+            val hasFace = state.verifiedMask and VERIFIED_FACE != 0
+            val hasFingerprint = state.verifiedMask and VERIFIED_FINGERPRINT != 0
+            if (hasFace && hasFingerprint) {
+                state.phase = Phase.COMPLETE
+                cancelDeadlineLocked(state)
+                logInfo(
+                    "DualAuth: both factors verified for ${state.packageName}; final=" +
+                        if (modality == TYPE_FACE) "FACE" else "FINGERPRINT"
+                )
+
+                if (modality == TYPE_FINGERPRINT) {
+                    return SuccessAction(SuccessDecision.PROCEED_CURRENT)
+                }
+
+                if (state.fingerprintSensorId >= 0) {
+                    return SuccessAction(
+                        decision = SuccessDecision.PROCEED_STORED_FINGERPRINT,
+                        sensorId = state.fingerprintSensorId,
+                        strong = state.fingerprintStrong,
+                        token = state.fingerprintToken?.clone(),
+                    )
+                }
+
+                logWarn("DualAuth: fingerprint completion cache missing; using current callback")
+                return SuccessAction(SuccessDecision.PROCEED_CURRENT)
+            }
+
+            state.phase = if (hasFace) Phase.WAIT_FINGERPRINT else Phase.WAIT_FACE
+            scheduleSecondFactorDeadlineLocked(session, state)
+            logInfo(
+                "DualAuth: first factor " +
+                    (if (modality == TYPE_FACE) "FACE" else "FINGERPRINT") +
+                    " verified for ${state.packageName}; waiting for the other factor"
+            )
+        }
+
+        sendGuidanceForCurrentState(session, state)
+        return SuccessAction(SuccessDecision.CONSUME)
+    }
     fun beforeErrorReceived(
         session: Any?,
         sensorId: Int,
