@@ -11,14 +11,18 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.Spinner
 import android.widget.TextView
 import java.util.Locale
 
@@ -30,17 +34,22 @@ class PolicyActivity : Activity() {
     private lateinit var summaryView: TextView
     private lateinit var scanButton: Button
     private lateinit var searchBox: EditText
+    private lateinit var showSystemApps: CheckBox
+    private lateinit var selectionView: TextView
+    private lateinit var batchSpinner: Spinner
+    private lateinit var batchApplyButton: Button
 
     private var allCandidates: List<BiometricCandidateApp> = emptyList()
+    private var visibleCandidates: List<BiometricCandidateApp> = emptyList()
+    private val selectedPackages = LinkedHashSet<String>()
     private var scanGeneration = 0
 
     private val serviceListener: (Boolean) -> Unit = {
         runOnUiThread {
             updateFrameworkStatus()
-            if (::adapter.isInitialized) {
-                adapter.notifyDataSetChanged()
-            }
+            if (::adapter.isInitialized) adapter.notifyDataSetChanged()
             updateSummary()
+            updateSelectionUi()
         }
     }
 
@@ -55,11 +64,15 @@ class PolicyActivity : Activity() {
         app = PolicyApplication.from(this)
         store = app.policyStore
 
-        window.statusBarColor = if (darkMode) Color.rgb(18, 18, 20) else Color.rgb(248, 249, 252)
-        window.navigationBarColor =
-            if (darkMode) Color.rgb(18, 18, 20) else Color.rgb(248, 249, 252)
+        val surface = if (darkMode) Color.rgb(18, 18, 20) else Color.rgb(248, 249, 252)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = surface
+        window.setDecorFitsSystemWindows(false)
 
-        setContentView(buildContent())
+        val content = buildContent()
+        setContentView(content)
+        installSystemBarInsets(content)
+
         app.addServiceListener(serviceListener)
         startScan()
     }
@@ -69,14 +82,34 @@ class PolicyActivity : Activity() {
         super.onDestroy()
     }
 
+    private fun installSystemBarInsets(root: View) {
+        val baseLeft = dp(20)
+        val baseTop = dp(18)
+        val baseRight = dp(20)
+        val baseBottom = dp(12)
+
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val bars = insets.getInsets(WindowInsets.Type.systemBars())
+            view.setPadding(
+                baseLeft,
+                baseTop + bars.top,
+                baseRight,
+                baseBottom + bars.bottom,
+            )
+            insets
+        }
+        root.requestApplyInsets()
+    }
+
     private fun buildContent(): View {
         val background = if (darkMode) Color.rgb(18, 18, 20) else Color.rgb(248, 249, 252)
         val primaryText = if (darkMode) Color.rgb(240, 240, 245) else Color.rgb(24, 25, 28)
         val secondaryText = if (darkMode) Color.rgb(178, 179, 187) else Color.rgb(91, 94, 103)
+        val panelColor = if (darkMode) Color.rgb(29, 30, 34) else Color.WHITE
+        val panelStroke = if (darkMode) Color.rgb(57, 59, 66) else Color.rgb(218, 221, 228)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(12))
             setBackgroundColor(background)
         }
 
@@ -98,7 +131,7 @@ class PolicyActivity : Activity() {
             setTextColor(secondaryText)
             textSize = 12f
             setPadding(dp(12), dp(8), dp(12), dp(8))
-            this.background = rounded(
+            background = rounded(
                 if (darkMode) Color.rgb(38, 39, 44) else Color.rgb(235, 238, 244),
                 12f,
             )
@@ -135,15 +168,15 @@ class PolicyActivity : Activity() {
             setTextColor(primaryText)
             setHintTextColor(secondaryText)
             setPadding(dp(14), dp(10), dp(14), dp(10))
-            this.background = rounded(
+            background = rounded(
                 if (darkMode) Color.rgb(31, 32, 36) else Color.WHITE,
                 14f,
-                strokeColor = if (darkMode) Color.rgb(64, 65, 72) else Color.rgb(218, 221, 228),
+                strokeColor = panelStroke,
             )
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    applyFilter(s?.toString().orEmpty())
+                    applyFilter()
                 }
                 override fun afterTextChanged(s: Editable?) = Unit
             })
@@ -153,7 +186,115 @@ class PolicyActivity : Activity() {
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(10) },
+            ).apply { bottomMargin = dp(8) },
+        )
+
+        showSystemApps = CheckBox(this).apply {
+            text = "显示系统应用"
+            setTextColor(primaryText)
+            textSize = 12f
+            isChecked = false
+            setOnCheckedChangeListener { _, _ -> applyFilter() }
+        }
+        root.addView(showSystemApps)
+
+        val batchPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(panelColor, 14f, panelStroke)
+        }
+
+        val selectionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        selectionView = TextView(this).apply {
+            setTextColor(primaryText)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        selectionRow.addView(
+            selectionView,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+
+        fun compactButton(label: String, action: () -> Unit): Button =
+            Button(this).apply {
+                text = label
+                isAllCaps = false
+                textSize = 11f
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(dp(10), 0, dp(10), 0)
+                setOnClickListener { action() }
+            }
+
+        selectionRow.addView(compactButton("全选当前") {
+            visibleCandidates.forEach { selectedPackages += it.packageName }
+            adapter.notifyDataSetChanged()
+            updateSelectionUi()
+        })
+        selectionRow.addView(compactButton("反选") {
+            visibleCandidates.forEach {
+                if (!selectedPackages.remove(it.packageName)) {
+                    selectedPackages += it.packageName
+                }
+            }
+            adapter.notifyDataSetChanged()
+            updateSelectionUi()
+        })
+        selectionRow.addView(compactButton("清空") {
+            selectedPackages.clear()
+            adapter.notifyDataSetChanged()
+            updateSelectionUi()
+        })
+        batchPanel.addView(selectionRow)
+
+        val batchActionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+
+        val batchLabels = listOf(
+            "人脸或指纹",
+            "仅人脸",
+            "仅指纹",
+            "人脸 + 指纹",
+        )
+        batchSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@PolicyActivity,
+                android.R.layout.simple_spinner_item,
+                batchLabels,
+            ).also {
+                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+        }
+        batchActionRow.addView(
+            batchSpinner,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+
+        batchApplyButton = Button(this).apply {
+            text = "应用到已选"
+            isAllCaps = false
+            isEnabled = false
+            setOnClickListener { applyBatchPolicy() }
+        }
+        batchActionRow.addView(batchApplyButton)
+        batchPanel.addView(batchActionRow)
+
+        root.addView(
+            batchPanel,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(10)
+            },
         )
 
         root.addView(TextView(this).apply {
@@ -169,7 +310,7 @@ class PolicyActivity : Activity() {
             dividerHeight = dp(8)
             clipToPadding = false
             setPadding(0, 0, 0, dp(16))
-            this.adapter = this@PolicyActivity.adapter
+            adapter = this@PolicyActivity.adapter
         }
         root.addView(
             list,
@@ -182,6 +323,7 @@ class PolicyActivity : Activity() {
 
         updateFrameworkStatus()
         updateSummary()
+        updateSelectionUi()
         return root
     }
 
@@ -195,26 +337,51 @@ class PolicyActivity : Activity() {
             runOnUiThread {
                 if (generation != scanGeneration) return@runOnUiThread
                 allCandidates = result
+                selectedPackages.retainAll(result.mapTo(HashSet()) { it.packageName })
                 scanButton.isEnabled = true
-                applyFilter(searchBox.text?.toString().orEmpty())
+                applyFilter()
                 updateSummary()
+                updateSelectionUi()
             }
         }, "FaceBiometricFix-app-scan").start()
     }
 
-    private fun applyFilter(rawQuery: String) {
-        if (!::adapter.isInitialized) return
-        val query = rawQuery.trim().lowercase(Locale.getDefault())
-        val filtered =
-            if (query.isBlank()) {
-                allCandidates
-            } else {
-                allCandidates.filter {
-                    it.label.lowercase(Locale.getDefault()).contains(query) ||
-                        it.packageName.lowercase(Locale.ROOT).contains(query)
-                }
+    private fun applyFilter() {
+        if (!::adapter.isInitialized || !::searchBox.isInitialized || !::showSystemApps.isInitialized) return
+
+        val query = searchBox.text?.toString().orEmpty()
+            .trim()
+            .lowercase(Locale.getDefault())
+
+        visibleCandidates = allCandidates.filter { candidate ->
+            val systemMatch = showSystemApps.isChecked || !candidate.isSystemApp
+            val queryMatch =
+                query.isBlank() ||
+                    candidate.label.lowercase(Locale.getDefault()).contains(query) ||
+                    candidate.packageName.lowercase(Locale.ROOT).contains(query)
+            systemMatch && queryMatch
+        }
+
+        adapter.submit(visibleCandidates)
+        updateSummary()
+        updateSelectionUi()
+    }
+
+    private fun applyBatchPolicy() {
+        if (selectedPackages.isEmpty()) return
+
+        val mode =
+            when (batchSpinner.selectedItemPosition) {
+                1 -> BiometricPolicyMode.FACE_ONLY
+                2 -> BiometricPolicyMode.FINGERPRINT_ONLY
+                3 -> BiometricPolicyMode.FACE_AND_FINGERPRINT
+                else -> BiometricPolicyMode.ANY
             }
-        adapter.submit(filtered)
+
+        store.setModes(selectedPackages, mode)
+        adapter.notifyDataSetChanged()
+        updateSummary()
+        updateSelectionUi()
     }
 
     private fun updateFrameworkStatus() {
@@ -230,7 +397,21 @@ class PolicyActivity : Activity() {
     private fun updateSummary() {
         if (!::summaryView.isInitialized) return
         summaryView.text =
-            "候选应用 ${allCandidates.size} · 已配置 ${store.configuredCount()}"
+            "候选 ${allCandidates.size} · 当前 ${visibleCandidates.size} · 已配置 ${store.configuredCount()}"
+    }
+
+    private fun updateSelectionUi() {
+        if (!::selectionView.isInitialized || !::batchApplyButton.isInitialized) return
+        val visibleSelected = visibleCandidates.count { it.packageName in selectedPackages }
+        selectionView.text =
+            if (selectedPackages.isEmpty()) {
+                "批量设置 · 未选择"
+            } else if (visibleSelected == selectedPackages.size) {
+                "已选择 ${selectedPackages.size}"
+            } else {
+                "已选择 ${selectedPackages.size} · 当前列表中 $visibleSelected"
+            }
+        batchApplyButton.isEnabled = selectedPackages.isNotEmpty()
     }
 
     private inner class CandidateAdapter : BaseAdapter() {
@@ -280,7 +461,7 @@ class PolicyActivity : Activity() {
 
             val textColumn = LinearLayout(this@PolicyActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), 0, 0, 0)
+                setPadding(dp(12), 0, dp(8), 0)
             }
 
             val label = TextView(this@PolicyActivity).apply {
@@ -307,6 +488,11 @@ class PolicyActivity : Activity() {
                 textColumn,
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
+
+            val select = CheckBox(this@PolicyActivity).apply {
+                contentDescription = "选择应用"
+            }
+            top.addView(select)
             root.addView(top)
 
             val current = TextView(this@PolicyActivity).apply {
@@ -357,6 +543,7 @@ class PolicyActivity : Activity() {
                 label = label,
                 packageName = packageName,
                 evidence = evidence,
+                select = select,
                 current = current,
                 group = group,
                 face = face,
@@ -373,6 +560,22 @@ class PolicyActivity : Activity() {
             holder.evidence.text =
                 BiometricAppScanner.evidenceLabel(item) +
                     if (item.isSystemApp) " · 系统应用" else ""
+
+            holder.select.setOnCheckedChangeListener(null)
+            holder.select.isChecked = item.packageName in selectedPackages
+            holder.select.setOnCheckedChangeListener { _, checked ->
+                if (checked) {
+                    selectedPackages += item.packageName
+                } else {
+                    selectedPackages -= item.packageName
+                }
+                updateSelectionUi()
+            }
+
+            holder.root.setOnLongClickListener {
+                holder.select.isChecked = !holder.select.isChecked
+                true
+            }
 
             val mode = store.modeFor(item.packageName)
             holder.current.text = "当前：${modeLabel(mode)}"
@@ -405,10 +608,6 @@ class PolicyActivity : Activity() {
 
             holder.reset.setOnClickListener {
                 store.setMode(item.packageName, BiometricPolicyMode.ANY)
-                holder.group.setOnCheckedChangeListener(null)
-                holder.group.clearCheck()
-                holder.current.text = "当前：${modeLabel(BiometricPolicyMode.ANY)}"
-                holder.reset.visibility = View.GONE
                 bindRow(holder, item)
                 updateSummary()
             }
@@ -421,6 +620,7 @@ class PolicyActivity : Activity() {
         val label: TextView,
         val packageName: TextView,
         val evidence: TextView,
+        val select: CheckBox,
         val current: TextView,
         val group: RadioGroup,
         val face: RadioButton,
