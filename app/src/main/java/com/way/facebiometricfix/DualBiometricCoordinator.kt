@@ -132,15 +132,26 @@ internal class DualBiometricCoordinator(
         return getOrCreateState(session) != null
     }
 
-    fun shouldForceFingerprintStart(session: Any?): Boolean {
-        if (session == null) return false
-        val state = getOrCreateState(session) ?: return false
-        synchronized(state) {
-            return state.phase != Phase.COMPLETE &&
-                state.phase != Phase.ABORTING &&
-                state.phase != Phase.TERMINATED
+    fun fingerprintStartOverride(session: Any?): Boolean? {
+        if (session == null) return null
+        return when (policyModeForSession(session)) {
+            BiometricPolicyMode.FACE_ONLY -> false
+            BiometricPolicyMode.FACE_AND_FINGERPRINT -> {
+                val state = getOrCreateState(session) ?: return null
+                synchronized(state) {
+                    state.phase != Phase.COMPLETE &&
+                        state.phase != Phase.ABORTING &&
+                        state.phase != Phase.TERMINATED
+                }
+            }
+            BiometricPolicyMode.ANY,
+            BiometricPolicyMode.FINGERPRINT_ONLY,
+            -> null
         }
     }
+
+    fun shouldBlockFingerprintStart(session: Any?): Boolean =
+        session != null && policyModeForSession(session) == BiometricPolicyMode.FACE_ONLY
 
     fun onDialogAnimatedIn(session: Any?) {
         if (session == null) return
@@ -159,12 +170,36 @@ internal class DualBiometricCoordinator(
         token: ByteArray?,
     ): SuccessAction {
         if (session == null) return SuccessAction(SuccessDecision.PROCEED_CURRENT)
-        val state = getOrCreateState(session)
-            ?: return SuccessAction(SuccessDecision.PROCEED_CURRENT)
+
         val modality = sensorModality(session, sensorId)
         if (modality != TYPE_FACE && modality != TYPE_FINGERPRINT) {
             return SuccessAction(SuccessDecision.PROCEED_CURRENT)
         }
+
+        when (policyModeForSession(session)) {
+            BiometricPolicyMode.ANY -> return SuccessAction(SuccessDecision.PROCEED_CURRENT)
+
+            BiometricPolicyMode.FACE_ONLY -> {
+                return if (modality == TYPE_FACE) {
+                    SuccessAction(SuccessDecision.PROCEED_CURRENT)
+                } else {
+                    SuccessAction(SuccessDecision.CONSUME)
+                }
+            }
+
+            BiometricPolicyMode.FINGERPRINT_ONLY -> {
+                return if (modality == TYPE_FINGERPRINT) {
+                    SuccessAction(SuccessDecision.PROCEED_CURRENT)
+                } else {
+                    SuccessAction(SuccessDecision.CONSUME)
+                }
+            }
+
+            BiometricPolicyMode.FACE_AND_FINGERPRINT -> Unit
+        }
+
+        val state = getOrCreateState(session)
+            ?: return SuccessAction(SuccessDecision.PROCEED_CURRENT)
 
         synchronized(state) {
             if (state.phase == Phase.ABORTING || state.phase == Phase.TERMINATED) {
@@ -343,6 +378,12 @@ internal class DualBiometricCoordinator(
         }
         logInfo("DualAuth: cleared ${state.packageName}; reason=$reason")
     }
+    private fun policyModeForSession(session: Any): BiometricPolicyMode {
+        val handles = handlesFor(session)
+        val packageName = readString(handles.opPackageName, session) ?: return BiometricPolicyMode.ANY
+        return DualBiometricPolicy.modeFor(packageName)
+    }
+
     private fun getOrCreateState(session: Any): SessionState? {
         findState(session)?.let { return it }
 
