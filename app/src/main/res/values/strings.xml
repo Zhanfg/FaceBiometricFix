@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">FaceBiometricFix</string>
-    <string name="xposed_description">将 ColorOS 人脸传感器强度修正为标准 Class3 强度，使人脸解锁可用于 BiometricPrompt，作者：WAYYYAW（github）</string>
+    <string name="xposed_description">ColorOS 生物识别兼容与按应用认证策略：支持人脸、指纹及双重认证。</string>
 </resources>
