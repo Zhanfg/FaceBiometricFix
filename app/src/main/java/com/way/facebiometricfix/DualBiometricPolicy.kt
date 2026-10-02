@@ -2,7 +2,7 @@ package com.way.facebiometricfix
 
 internal enum class BiometricPolicyMode {
     ANY,
-    FACE_THEN_FINGERPRINT,
+    FACE_AND_FINGERPRINT,
     FINGERPRINT_ONLY,
 }
 
@@ -24,6 +24,6 @@ internal object DualBiometricPolicy {
         if (packageName.isBlank() || packageName in excludedPackages) {
             return BiometricPolicyMode.ANY
         }
-        return BiometricPolicyMode.FACE_THEN_FINGERPRINT
+        return BiometricPolicyMode.FACE_AND_FINGERPRINT
     }
 }
