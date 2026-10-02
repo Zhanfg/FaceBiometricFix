@@ -6,7 +6,9 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.TextView
+import java.util.WeakHashMap
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
@@ -316,6 +318,8 @@ class MainHook : XposedModule() {
             return
         }
 
+        installPromptCollisionGuard(root)
+
         val confirmRect = Rect()
         if (!confirm.getGlobalVisibleRect(confirmRect) || confirmRect.isEmpty) {
             logWarn("PROBE[${delayMs}ms]: confirmation view has no visible rect")
@@ -345,9 +349,89 @@ class MainHook : XposedModule() {
                 "FIX[${delayMs}ms]: hiding overlapping biometric view " +
                     describeView(view)
             )
-            view.visibility = View.INVISIBLE
-            view.isClickable = false
+            hardHideBiometricView(view)
         }
+    }
+
+    /**
+     * ColorOS 16 runtime evidence shows the exact overlapping pair is
+     * biometric_icon / biometric_icon_overlay, both BiometricPromptLottieViewWrapper.
+     *
+     * A one-shot visibility change is not strong enough if the prompt state machine
+     * later marks the wrappers visible again. Keep this guard local to the current
+     * BiometricPrompt root and suppress only those two views immediately before draw
+     * while the real confirmation button is visible.
+     */
+    private fun installPromptCollisionGuard(root: View) {
+        if (PROMPT_GUARDS.containsKey(root)) return
+
+        val confirmId = resourceId(root, "button_confirm")
+        val iconId = resourceId(root, "biometric_icon")
+        val overlayId = resourceId(root, "biometric_icon_overlay")
+        if (confirmId == 0 || (iconId == 0 && overlayId == 0)) return
+
+        val observer = root.viewTreeObserver
+        if (!observer.isAlive) return
+
+        val listener = object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (!root.isAttachedToWindow) {
+                    removePromptCollisionGuard(root, this)
+                    return true
+                }
+
+                val confirm = root.findViewById<View>(confirmId)
+                if (
+                    confirm == null ||
+                    confirm.visibility != View.VISIBLE ||
+                    !confirm.isEnabled
+                ) {
+                    return true
+                }
+
+                if (iconId != 0) {
+                    root.findViewById<View>(iconId)?.let { hardHideBiometricView(it) }
+                }
+                if (overlayId != 0) {
+                    root.findViewById<View>(overlayId)?.let { hardHideBiometricView(it) }
+                }
+                return true
+            }
+        }
+
+        PROMPT_GUARDS[root] = listener
+        observer.addOnPreDrawListener(listener)
+        logInfo("OK: installed prompt-local pre-draw guard for biometric icon overlap")
+    }
+
+    private fun removePromptCollisionGuard(
+        root: View,
+        listener: ViewTreeObserver.OnPreDrawListener
+    ) {
+        runCatching {
+            val observer = root.viewTreeObserver
+            if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+        }
+        PROMPT_GUARDS.remove(root)
+    }
+
+    private fun hardHideBiometricView(view: View) {
+        runCatching { view.animate().cancel() }
+        runCatching { view.clearAnimation() }
+        runCatching { findNoArgMethod(view.javaClass, "cancelAnimation")?.invoke(view) }
+        runCatching { findNoArgMethod(view.javaClass, "pauseAnimation")?.invoke(view) }
+        runCatching { findNoArgMethod(view.javaClass, "stop")?.invoke(view) }
+
+        view.isClickable = false
+        view.isFocusable = false
+        view.alpha = 0f
+        view.visibility = View.GONE
+    }
+
+    private fun resourceId(root: View, name: String): Int {
+        return runCatching {
+            root.resources.getIdentifier(name, "id", SYSTEM_UI_PACKAGE)
+        }.getOrDefault(0)
     }
 
     private fun findCurrentDialogView(authController: Any?): View? {
@@ -735,6 +819,8 @@ class MainHook : XposedModule() {
         private const val MAX_PROBE_LINES = 80
 
         private val APP_PRE_AUTH_PACKAGE = ThreadLocal<String>()
+        private val PROMPT_GUARDS =
+            WeakHashMap<View, ViewTreeObserver.OnPreDrawListener>()
 
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
         private const val CODEBOOK_PACKAGE = "com.coloros.codebook"
