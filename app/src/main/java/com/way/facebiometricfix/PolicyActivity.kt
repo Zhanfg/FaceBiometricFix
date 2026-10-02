@@ -1,77 +1,106 @@
 package com.way.facebiometricfix
 
-import android.app.Activity
-import android.content.res.Configuration
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
-import android.text.Editable
-import android.text.TextWatcher
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.view.WindowInsets
-import android.widget.ArrayAdapter
-import android.widget.BaseAdapter
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ListView
-import android.widget.RadioButton
-import android.widget.RadioGroup
-import android.widget.Spinner
-import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import java.util.Locale
 
-class PolicyActivity : Activity() {
+class PolicyActivity : ComponentActivity() {
     private lateinit var app: PolicyApplication
     private lateinit var store: PolicyStore
-    private lateinit var adapter: CandidateAdapter
-    private lateinit var statusView: TextView
-    private lateinit var summaryView: TextView
-    private lateinit var scanButton: Button
-    private lateinit var searchBox: EditText
-    private lateinit var showSystemApps: CheckBox
-    private lateinit var selectionView: TextView
-    private lateinit var batchSpinner: Spinner
-    private lateinit var batchApplyButton: Button
 
-    private var allCandidates: List<BiometricCandidateApp> = emptyList()
-    private var visibleCandidates: List<BiometricCandidateApp> = emptyList()
-    private val selectedPackages = LinkedHashSet<String>()
-    private var scanGeneration = 0
+    private var candidates by mutableStateOf<List<BiometricCandidateApp>>(emptyList())
+    private var scanning by mutableStateOf(false)
+    private var frameworkConnected by mutableStateOf(false)
+    private var defaultMode by mutableStateOf(BiometricPolicyMode.ANY)
+    private var policyRevision by mutableStateOf(0)
 
-    private val serviceListener: (Boolean) -> Unit = {
+    private val serviceListener: (Boolean) -> Unit = { connected ->
         runOnUiThread {
-            updateFrameworkStatus()
-            if (::adapter.isInitialized) adapter.notifyDataSetChanged()
-            updateSummary()
-            updateSelectionUi()
+            frameworkConnected = connected
+            defaultMode = store.defaultMode()
+            policyRevision++
         }
     }
-
-    private val darkMode: Boolean
-        get() =
-            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-                Configuration.UI_MODE_NIGHT_YES
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         app = PolicyApplication.from(this)
         store = app.policyStore
+        frameworkConnected = app.isFrameworkConnected()
+        defaultMode = store.defaultMode()
 
-        val surface = if (darkMode) Color.rgb(18, 18, 20) else Color.rgb(248, 249, 252)
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = surface
-        window.setDecorFitsSystemWindows(false)
+        enableEdgeToEdge()
 
-        val content = buildContent()
-        setContentView(content)
-        installSystemBarInsets(content)
+        setContent {
+            FaceBiometricFixTheme {
+                PolicyManagerScreen()
+            }
+        }
 
         app.addServiceListener(serviceListener)
         startScan()
@@ -82,574 +111,711 @@ class PolicyActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun installSystemBarInsets(root: View) {
-        val baseLeft = dp(20)
-        val baseTop = dp(18)
-        val baseRight = dp(20)
-        val baseBottom = dp(12)
-
-        root.setOnApplyWindowInsetsListener { view, insets ->
-            val bars = insets.getInsets(WindowInsets.Type.systemBars())
-            view.setPadding(
-                baseLeft,
-                baseTop + bars.top,
-                baseRight,
-                baseBottom + bars.bottom,
-            )
-            insets
-        }
-        root.requestApplyInsets()
-    }
-
-    private fun buildContent(): View {
-        val background = if (darkMode) Color.rgb(18, 18, 20) else Color.rgb(248, 249, 252)
-        val primaryText = if (darkMode) Color.rgb(240, 240, 245) else Color.rgb(24, 25, 28)
-        val secondaryText = if (darkMode) Color.rgb(178, 179, 187) else Color.rgb(91, 94, 103)
-        val panelColor = if (darkMode) Color.rgb(29, 30, 34) else Color.WHITE
-        val panelStroke = if (darkMode) Color.rgb(57, 59, 66) else Color.rgb(218, 221, 228)
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(background)
-        }
-
-        root.addView(TextView(this).apply {
-            text = "生物认证策略"
-            setTextColor(primaryText)
-            textSize = 27f
-            typeface = Typeface.DEFAULT_BOLD
-        })
-
-        root.addView(TextView(this).apply {
-            text = "扫描使用系统生物识别权限的应用，并为每个应用选择认证方式。"
-            setTextColor(secondaryText)
-            textSize = 14f
-            setPadding(0, dp(4), 0, dp(12))
-        })
-
-        statusView = TextView(this).apply {
-            setTextColor(secondaryText)
-            textSize = 12f
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            this.background = rounded(
-                if (darkMode) Color.rgb(38, 39, 44) else Color.rgb(235, 238, 244),
-                12f,
-            )
-        }
-        root.addView(statusView)
-
-        val scanRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(8))
-        }
-
-        summaryView = TextView(this).apply {
-            setTextColor(primaryText)
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        scanRow.addView(
-            summaryView,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-
-        scanButton = Button(this).apply {
-            text = "重新扫描"
-            isAllCaps = false
-            setOnClickListener { startScan() }
-        }
-        scanRow.addView(scanButton)
-        root.addView(scanRow)
-
-        searchBox = EditText(this).apply {
-            hint = "搜索应用或包名"
-            isSingleLine = true
-            setTextColor(primaryText)
-            setHintTextColor(secondaryText)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            this.background = rounded(
-                if (darkMode) Color.rgb(31, 32, 36) else Color.WHITE,
-                14f,
-                strokeColor = panelStroke,
-            )
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    applyFilter()
-                }
-                override fun afterTextChanged(s: Editable?) = Unit
-            })
-        }
-        root.addView(
-            searchBox,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(8) },
-        )
-
-        showSystemApps = CheckBox(this).apply {
-            text = "显示系统应用"
-            setTextColor(primaryText)
-            textSize = 12f
-            isChecked = false
-            setOnCheckedChangeListener { _, _ -> applyFilter() }
-        }
-        root.addView(showSystemApps)
-
-        val batchPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            this.background = rounded(panelColor, 14f, panelStroke)
-        }
-
-        val selectionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        selectionView = TextView(this).apply {
-            setTextColor(primaryText)
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        selectionRow.addView(
-            selectionView,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-
-        fun compactButton(label: String, action: () -> Unit): Button =
-            Button(this).apply {
-                text = label
-                isAllCaps = false
-                textSize = 11f
-                minWidth = 0
-                minimumWidth = 0
-                setPadding(dp(10), 0, dp(10), 0)
-                setOnClickListener { action() }
-            }
-
-        selectionRow.addView(compactButton("全选当前") {
-            visibleCandidates.forEach { selectedPackages += it.packageName }
-            adapter.notifyDataSetChanged()
-            updateSelectionUi()
-        })
-        selectionRow.addView(compactButton("反选") {
-            visibleCandidates.forEach {
-                if (!selectedPackages.remove(it.packageName)) {
-                    selectedPackages += it.packageName
-                }
-            }
-            adapter.notifyDataSetChanged()
-            updateSelectionUi()
-        })
-        selectionRow.addView(compactButton("清空") {
-            selectedPackages.clear()
-            adapter.notifyDataSetChanged()
-            updateSelectionUi()
-        })
-        batchPanel.addView(selectionRow)
-
-        val batchActionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8), 0, 0)
-        }
-
-        val batchLabels = listOf(
-            "人脸或指纹",
-            "仅人脸",
-            "仅指纹",
-            "人脸 + 指纹",
-        )
-        batchSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@PolicyActivity,
-                android.R.layout.simple_spinner_item,
-                batchLabels,
-            ).also {
-                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            }
-        }
-        batchActionRow.addView(
-            batchSpinner,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-
-        batchApplyButton = Button(this).apply {
-            text = "应用到已选"
-            isAllCaps = false
-            isEnabled = false
-            setOnClickListener { applyBatchPolicy() }
-        }
-        batchActionRow.addView(batchApplyButton)
-        batchPanel.addView(batchActionRow)
-
-        root.addView(
-            batchPanel,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                topMargin = dp(4)
-                bottomMargin = dp(10)
-            },
-        )
-
-        root.addView(TextView(this).apply {
-            text = "检测依据是应用声明的 USE_BIOMETRIC / USE_FINGERPRINT 权限；它表示应用具备调用生物识别的能力，不代表应用一定已开启内部锁。"
-            setTextColor(secondaryText)
-            textSize = 11f
-            setPadding(dp(2), 0, dp(2), dp(10))
-        })
-
-        adapter = CandidateAdapter()
-        val list = ListView(this).apply {
-            divider = null
-            dividerHeight = dp(8)
-            clipToPadding = false
-            setPadding(0, 0, 0, dp(16))
-            adapter = this@PolicyActivity.adapter
-        }
-        root.addView(
-            list,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ),
-        )
-
-        updateFrameworkStatus()
-        updateSummary()
-        updateSelectionUi()
-        return root
-    }
-
     private fun startScan() {
-        val generation = ++scanGeneration
-        scanButton.isEnabled = false
-        summaryView.text = "正在扫描…"
+        if (scanning) return
+        scanning = true
 
         Thread({
-            val result = runCatching { BiometricAppScanner.scan(this) }.getOrElse { emptyList() }
+            val result = runCatching {
+                BiometricAppScanner.scan(this)
+            }.getOrDefault(emptyList())
+
+            store.updateManagedPackages(
+                result.asSequence()
+                    .filterNot { it.isSystemApp }
+                    .map { it.packageName }
+                    .toSet()
+            )
+
             runOnUiThread {
-                if (generation != scanGeneration) return@runOnUiThread
-                allCandidates = result
-                selectedPackages.retainAll(result.mapTo(HashSet()) { it.packageName })
-                scanButton.isEnabled = true
-                applyFilter()
-                updateSummary()
-                updateSelectionUi()
+                candidates = result
+                scanning = false
+                defaultMode = store.defaultMode()
+                policyRevision++
             }
         }, "FaceBiometricFix-app-scan").start()
     }
 
-    private fun applyFilter() {
-        if (!::adapter.isInitialized || !::searchBox.isInitialized || !::showSystemApps.isInitialized) return
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun PolicyManagerScreen() {
+        var query by rememberSaveable { mutableStateOf("") }
+        var showSystemApps by rememberSaveable { mutableStateOf(false) }
+        var configuredOnly by rememberSaveable { mutableStateOf(false) }
+        var selectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
+        var editTarget by remember { mutableStateOf<BiometricCandidateApp?>(null) }
+        var batchMode by remember { mutableStateOf<BiometricPolicyMode?>(null) }
 
-        val query = searchBox.text?.toString().orEmpty()
-            .trim()
-            .lowercase(Locale.getDefault())
+        policyRevision
 
-        visibleCandidates = allCandidates.filter { candidate ->
-            val systemMatch = showSystemApps.isChecked || !candidate.isSystemApp
-            val queryMatch =
-                query.isBlank() ||
-                    candidate.label.lowercase(Locale.getDefault()).contains(query) ||
-                    candidate.packageName.lowercase(Locale.ROOT).contains(query)
-            systemMatch && queryMatch
+        val density = LocalDensity.current
+        val imeVisible = WindowInsets.ime.getBottom(density) > 0
+
+        val visibleApps = remember(
+            candidates,
+            query,
+            showSystemApps,
+            configuredOnly,
+            policyRevision,
+        ) {
+            val needle = query.trim().lowercase(Locale.getDefault())
+            candidates.filter { candidate ->
+                val systemMatch = showSystemApps || !candidate.isSystemApp
+                val queryMatch =
+                    needle.isBlank() ||
+                        candidate.label.lowercase(Locale.getDefault()).contains(needle) ||
+                        candidate.packageName.lowercase(Locale.ROOT).contains(needle)
+                val configuredMatch =
+                    !configuredOnly || store.explicitModeFor(candidate.packageName) != null
+
+                systemMatch && queryMatch && configuredMatch
+            }
         }
 
-        adapter.submit(visibleCandidates)
-        updateSummary()
-        updateSelectionUi()
-    }
+        selectedPackages = selectedPackages.intersect(
+            candidates.mapTo(HashSet()) { it.packageName }
+        )
 
-    private fun applyBatchPolicy() {
-        if (selectedPackages.isEmpty()) return
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                text = "生物认证策略",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            if (!imeVisible) {
+                                Text(
+                                    text = "候选 ${candidates.size} · 当前 ${visibleApps.size} · 已单独设置 ${store.configuredCount()}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                )
+            },
+            bottomBar = {
+                if (selectedPackages.isNotEmpty() && !imeVisible) {
+                    BatchActionBar(
+                        selectedCount = selectedPackages.size,
+                        selectedMode = batchMode,
+                        onModeSelected = { batchMode = it },
+                        onApply = {
+                            store.setModes(selectedPackages, batchMode)
+                            selectedPackages = emptySet()
+                            policyRevision++
+                        },
+                        onClearSelection = {
+                            selectedPackages = emptySet()
+                        },
+                    )
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+            ) {
+                SearchAndFilters(
+                    query = query,
+                    onQueryChange = { query = it },
+                    showSystemApps = showSystemApps,
+                    onShowSystemAppsChange = { showSystemApps = it },
+                    configuredOnly = configuredOnly,
+                    onConfiguredOnlyChange = { configuredOnly = it },
+                    scanning = scanning,
+                    onRescan = ::startScan,
+                    visibleCount = visibleApps.size,
+                    selectedCount = selectedPackages.size,
+                    onSelectVisible = {
+                        selectedPackages = selectedPackages + visibleApps.map { it.packageName }
+                    },
+                    onClearSelection = {
+                        selectedPackages = emptySet()
+                    },
+                )
 
-        val mode =
-            when (batchSpinner.selectedItemPosition) {
-                1 -> BiometricPolicyMode.FACE_ONLY
-                2 -> BiometricPolicyMode.FINGERPRINT_ONLY
-                3 -> BiometricPolicyMode.FACE_AND_FINGERPRINT
-                else -> BiometricPolicyMode.ANY
-            }
+                if (!imeVisible) {
+                    Spacer(Modifier.height(8.dp))
+                    ConnectionBanner(frameworkConnected)
 
-        store.setModes(selectedPackages, mode)
-        adapter.notifyDataSetChanged()
-        updateSummary()
-        updateSelectionUi()
-    }
+                    Spacer(Modifier.height(10.dp))
+                    DefaultPolicyCard(
+                        current = defaultMode,
+                        onSelect = { mode ->
+                            store.setDefaultMode(mode)
+                            defaultMode = mode
+                            policyRevision++
+                        },
+                    )
 
-    private fun updateFrameworkStatus() {
-        if (!::statusView.isInitialized) return
-        statusView.text =
-            if (app.isFrameworkConnected()) {
-                "LSPosed 配置通道已连接 · 修改对新认证会话实时生效"
-            } else {
-                "正在等待 LSPosed 配置通道 · 当前修改会先保存在本机"
-            }
-    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "扫描依据为应用声明的 USE_BIOMETRIC / USE_FINGERPRINT 权限；这表示应用具备调用生物识别的能力，不代表其内部认证功能一定已开启。",
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
 
-    private fun updateSummary() {
-        if (!::summaryView.isInitialized) return
-        summaryView.text =
-            "候选 ${allCandidates.size} · 当前 ${visibleCandidates.size} · 已配置 ${store.configuredCount()}"
-    }
-
-    private fun updateSelectionUi() {
-        if (!::selectionView.isInitialized || !::batchApplyButton.isInitialized) return
-        val visibleSelected = visibleCandidates.count { it.packageName in selectedPackages }
-        selectionView.text =
-            if (selectedPackages.isEmpty()) {
-                "批量设置 · 未选择"
-            } else if (visibleSelected == selectedPackages.size) {
-                "已选择 ${selectedPackages.size}"
-            } else {
-                "已选择 ${selectedPackages.size} · 当前列表中 $visibleSelected"
-            }
-        batchApplyButton.isEnabled = selectedPackages.isNotEmpty()
-    }
-
-    private inner class CandidateAdapter : BaseAdapter() {
-        private var items: List<BiometricCandidateApp> = emptyList()
-
-        fun submit(newItems: List<BiometricCandidateApp>) {
-            items = newItems
-            notifyDataSetChanged()
-        }
-
-        override fun getCount(): Int = items.size
-        override fun getItem(position: Int): BiometricCandidateApp = items[position]
-        override fun getItemId(position: Int): Long = items[position].packageName.hashCode().toLong()
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val holder =
-                if (convertView?.tag is RowHolder) {
-                    convertView.tag as RowHolder
+                if (visibleApps.isEmpty()) {
+                    EmptyState(
+                        scanning = scanning,
+                        modifier = Modifier.weight(1f),
+                    )
                 } else {
-                    createRow().also { it.root.tag = it }
-                }
-
-            bindRow(holder, getItem(position))
-            return holder.root
-        }
-
-        private fun createRow(): RowHolder {
-            val primaryText = if (darkMode) Color.rgb(240, 240, 245) else Color.rgb(24, 25, 28)
-            val secondaryText = if (darkMode) Color.rgb(174, 176, 184) else Color.rgb(92, 95, 104)
-            val cardColor = if (darkMode) Color.rgb(29, 30, 34) else Color.WHITE
-
-            val root = LinearLayout(this@PolicyActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(14), dp(14), dp(14), dp(12))
-                this.background = rounded(cardColor, 18f)
-            }
-
-            val top = LinearLayout(this@PolicyActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            val icon = ImageView(this@PolicyActivity).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-            }
-            top.addView(icon, LinearLayout.LayoutParams(dp(48), dp(48)))
-
-            val textColumn = LinearLayout(this@PolicyActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), 0, dp(8), 0)
-            }
-
-            val label = TextView(this@PolicyActivity).apply {
-                setTextColor(primaryText)
-                textSize = 16f
-                typeface = Typeface.DEFAULT_BOLD
-                maxLines = 1
-            }
-            val packageName = TextView(this@PolicyActivity).apply {
-                setTextColor(secondaryText)
-                textSize = 11f
-                maxLines = 1
-            }
-            val evidence = TextView(this@PolicyActivity).apply {
-                setTextColor(secondaryText)
-                textSize = 11f
-                maxLines = 1
-            }
-
-            textColumn.addView(label)
-            textColumn.addView(packageName)
-            textColumn.addView(evidence)
-            top.addView(
-                textColumn,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-
-            val select = CheckBox(this@PolicyActivity).apply {
-                contentDescription = "选择应用"
-            }
-            top.addView(select)
-            root.addView(top)
-
-            val current = TextView(this@PolicyActivity).apply {
-                setTextColor(secondaryText)
-                textSize = 12f
-                setPadding(0, dp(10), 0, dp(4))
-            }
-            root.addView(current)
-
-            val group = RadioGroup(this@PolicyActivity).apply {
-                orientation = RadioGroup.HORIZONTAL
-                gravity = Gravity.START
-            }
-
-            fun radio(text: String): RadioButton =
-                RadioButton(this@PolicyActivity).apply {
-                    this.text = text
-                    setTextColor(primaryText)
-                    textSize = 12f
-                    id = View.generateViewId()
-                    setPadding(0, 0, dp(8), 0)
-                }
-
-            val face = radio("仅人脸")
-            val fingerprint = radio("仅指纹")
-            val dual = radio("人脸 + 指纹")
-            group.addView(face)
-            group.addView(fingerprint)
-            group.addView(dual)
-            root.addView(group)
-
-            val reset = Button(this@PolicyActivity).apply {
-                text = "恢复为人脸或指纹"
-                isAllCaps = false
-                textSize = 11f
-            }
-            root.addView(
-                reset,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-
-            return RowHolder(
-                root = root,
-                icon = icon,
-                label = label,
-                packageName = packageName,
-                evidence = evidence,
-                select = select,
-                current = current,
-                group = group,
-                face = face,
-                fingerprint = fingerprint,
-                dual = dual,
-                reset = reset,
-            )
-        }
-
-        private fun bindRow(holder: RowHolder, item: BiometricCandidateApp) {
-            holder.icon.setImageDrawable(item.icon)
-            holder.label.text = item.label
-            holder.packageName.text = item.packageName
-            holder.evidence.text =
-                BiometricAppScanner.evidenceLabel(item) +
-                    if (item.isSystemApp) " · 系统应用" else ""
-
-            holder.select.setOnCheckedChangeListener(null)
-            holder.select.isChecked = item.packageName in selectedPackages
-            holder.select.setOnCheckedChangeListener { _, checked ->
-                if (checked) {
-                    selectedPackages += item.packageName
-                } else {
-                    selectedPackages -= item.packageName
-                }
-                updateSelectionUi()
-            }
-
-            holder.root.setOnLongClickListener {
-                holder.select.isChecked = !holder.select.isChecked
-                true
-            }
-
-            val mode = store.modeFor(item.packageName)
-            holder.current.text = "当前：${modeLabel(mode)}"
-
-            holder.group.setOnCheckedChangeListener(null)
-            holder.group.clearCheck()
-            when (mode) {
-                BiometricPolicyMode.FACE_ONLY -> holder.group.check(holder.face.id)
-                BiometricPolicyMode.FINGERPRINT_ONLY -> holder.group.check(holder.fingerprint.id)
-                BiometricPolicyMode.FACE_AND_FINGERPRINT -> holder.group.check(holder.dual.id)
-                BiometricPolicyMode.ANY -> Unit
-            }
-
-            holder.reset.visibility =
-                if (mode == BiometricPolicyMode.ANY) View.GONE else View.VISIBLE
-
-            holder.group.setOnCheckedChangeListener { _, checkedId ->
-                val selected =
-                    when (checkedId) {
-                        holder.face.id -> BiometricPolicyMode.FACE_ONLY
-                        holder.fingerprint.id -> BiometricPolicyMode.FINGERPRINT_ONLY
-                        holder.dual.id -> BiometricPolicyMode.FACE_AND_FINGERPRINT
-                        else -> return@setOnCheckedChangeListener
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(
+                            start = 12.dp,
+                            end = 12.dp,
+                            top = 4.dp,
+                            bottom = if (selectedPackages.isNotEmpty()) 96.dp else 20.dp,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(
+                            items = visibleApps,
+                            key = { it.packageName },
+                        ) { candidate ->
+                            AppPolicyCard(
+                                candidate = candidate,
+                                selected = candidate.packageName in selectedPackages,
+                                explicitMode = store.explicitModeFor(candidate.packageName),
+                                effectiveMode = store.effectiveModeFor(candidate.packageName),
+                                onSelectionChange = { checked ->
+                                    selectedPackages =
+                                        if (checked) {
+                                            selectedPackages + candidate.packageName
+                                        } else {
+                                            selectedPackages - candidate.packageName
+                                        }
+                                },
+                                onOpen = { editTarget = candidate },
+                            )
+                        }
                     }
-                store.setMode(item.packageName, selected)
-                holder.current.text = "当前：${modeLabel(selected)}"
-                holder.reset.visibility = View.VISIBLE
-                updateSummary()
+                }
             }
+        }
 
-            holder.reset.setOnClickListener {
-                store.setMode(item.packageName, BiometricPolicyMode.ANY)
-                bindRow(holder, item)
-                updateSummary()
+        editTarget?.let { target ->
+            AppPolicySheet(
+                app = target,
+                explicitMode = store.explicitModeFor(target.packageName),
+                defaultMode = defaultMode,
+                onDismiss = { editTarget = null },
+                onSelect = { mode ->
+                    store.setMode(target.packageName, mode)
+                    policyRevision++
+                    editTarget = null
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun SearchAndFilters(
+        query: String,
+        onQueryChange: (String) -> Unit,
+        showSystemApps: Boolean,
+        onShowSystemAppsChange: (Boolean) -> Unit,
+        configuredOnly: Boolean,
+        onConfiguredOnlyChange: (Boolean) -> Unit,
+        scanning: Boolean,
+        onRescan: () -> Unit,
+        visibleCount: Int,
+        selectedCount: Int,
+        onSelectVisible: () -> Unit,
+        onClearSelection: () -> Unit,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("搜索应用或包名") },
+                shape = RoundedCornerShape(28.dp),
+                keyboardOptions = KeyboardOptions(
+                    imeAction = ImeAction.Search,
+                    autoCorrectEnabled = false,
+                ),
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        TextButton(onClick = { onQueryChange("") }) {
+                            Text("清除")
+                        }
+                    }
+                },
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = showSystemApps,
+                    onClick = { onShowSystemAppsChange(!showSystemApps) },
+                    label = { Text(if (showSystemApps) "含系统应用" else "普通应用") },
+                )
+                FilterChip(
+                    selected = configuredOnly,
+                    onClick = { onConfiguredOnlyChange(!configuredOnly) },
+                    label = { Text("仅已单独设置") },
+                )
+                FilterChip(
+                    selected = false,
+                    onClick = onSelectVisible,
+                    label = { Text("全选当前 $visibleCount") },
+                    enabled = visibleCount > 0,
+                )
+                if (selectedCount > 0) {
+                    FilterChip(
+                        selected = true,
+                        onClick = onClearSelection,
+                        label = { Text("已选 $selectedCount · 清空") },
+                    )
+                }
+                FilterChip(
+                    selected = scanning,
+                    onClick = onRescan,
+                    enabled = !scanning,
+                    label = { Text(if (scanning) "扫描中…" else "重新扫描") },
+                )
             }
         }
     }
 
-    private data class RowHolder(
-        val root: LinearLayout,
-        val icon: ImageView,
-        val label: TextView,
-        val packageName: TextView,
-        val evidence: TextView,
-        val select: CheckBox,
-        val current: TextView,
-        val group: RadioGroup,
-        val face: RadioButton,
-        val fingerprint: RadioButton,
-        val dual: RadioButton,
-        val reset: Button,
+    @Composable
+    private fun ConnectionBanner(connected: Boolean) {
+        Surface(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            shape = RoundedCornerShape(20.dp),
+            color =
+                if (connected) {
+                    MaterialTheme.colorScheme.secondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+        ) {
+            Text(
+                text =
+                    if (connected) {
+                        "LSPosed 配置通道已连接 · 新认证会话实时生效"
+                    } else {
+                        "正在等待 LSPosed 配置通道 · 修改会先保存在本机"
+                    },
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color =
+                    if (connected) {
+                        MaterialTheme.colorScheme.onSecondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+            )
+        }
+    }
+
+    @Composable
+    private fun DefaultPolicyCard(
+        current: BiometricPolicyMode,
+        onSelect: (BiometricPolicyMode) -> Unit,
+    ) {
+        Card(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "默认认证方式",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "应用于扫描到且未单独设置的普通应用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    defaultChoices().forEach { choice ->
+                        FilterChip(
+                            selected = current == choice.mode,
+                            onClick = { onSelect(choice.mode) },
+                            label = { Text(choice.label) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun AppPolicyCard(
+        candidate: BiometricCandidateApp,
+        selected: Boolean,
+        explicitMode: BiometricPolicyMode?,
+        effectiveMode: BiometricPolicyMode,
+        onSelectionChange: (Boolean) -> Unit,
+        onOpen: () -> Unit,
+    ) {
+        Card(
+            onClick = onOpen,
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor =
+                    if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainer
+                    },
+            ),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = onSelectionChange,
+                )
+
+                Spacer(Modifier.width(6.dp))
+
+                AndroidView(
+                    factory = { context ->
+                        ImageView(context).apply {
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                        }
+                    },
+                    update = { view ->
+                        view.setImageDrawable(candidate.icon)
+                    },
+                    modifier = Modifier
+                        .size(50.dp)
+                        .clip(RoundedCornerShape(16.dp)),
+                )
+
+                Spacer(Modifier.width(12.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = candidate.label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = candidate.packageName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = BiometricAppScanner.evidenceLabel(candidate),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text =
+                            if (explicitMode == null) {
+                                "跟随默认 · ${modeLabel(effectiveMode)}"
+                            } else {
+                                "单独设置 · ${modeLabel(explicitMode)}"
+                            },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                Spacer(Modifier.width(8.dp))
+
+                Text(
+                    text = "设置",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AppPolicySheet(
+        app: BiometricCandidateApp,
+        explicitMode: BiometricPolicyMode?,
+        defaultMode: BiometricPolicyMode,
+        onDismiss: () -> Unit,
+        onSelect: (BiometricPolicyMode?) -> Unit,
+    ) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = sheetState,
+            shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 24.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AndroidView(
+                        factory = { context -> ImageView(context) },
+                        update = { it.setImageDrawable(app.icon) },
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(16.dp)),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = app.label,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = app.packageName,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                HorizontalDivider()
+
+                PolicyOptionRow(
+                    title = "跟随默认策略",
+                    subtitle = "当前默认：${modeLabel(defaultMode)}",
+                    selected = explicitMode == null,
+                    onClick = { onSelect(null) },
+                )
+
+                allExplicitChoices().forEach { choice ->
+                    PolicyOptionRow(
+                        title = choice.label,
+                        subtitle = choice.description,
+                        selected = explicitMode == choice.mode,
+                        onClick = { onSelect(choice.mode) },
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun PolicyOptionRow(
+        title: String,
+        subtitle: String,
+        selected: Boolean,
+        onClick: () -> Unit,
+    ) {
+        ListItem(
+            headlineContent = { Text(title) },
+            supportingContent = { Text(subtitle) },
+            leadingContent = {
+                RadioButton(
+                    selected = selected,
+                    onClick = onClick,
+                )
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+
+    @Composable
+    private fun BatchActionBar(
+        selectedCount: Int,
+        selectedMode: BiometricPolicyMode?,
+        onModeSelected: (BiometricPolicyMode?) -> Unit,
+        onApply: () -> Unit,
+        onClearSelection: () -> Unit,
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding(),
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "已选择 $selectedCount 个应用",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    TextButton(onClick = onClearSelection) {
+                        Text("取消选择")
+                    }
+                    Button(onClick = onApply) {
+                        Text("应用")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = selectedMode == null,
+                        onClick = { onModeSelected(null) },
+                        label = { Text("跟随默认") },
+                    )
+                    allExplicitChoices().forEach { choice ->
+                        FilterChip(
+                            selected = selectedMode == choice.mode,
+                            onClick = { onModeSelected(choice.mode) },
+                            label = { Text(choice.label) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun EmptyState(
+        scanning: Boolean,
+        modifier: Modifier = Modifier,
+    ) {
+        Box(
+            modifier = modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (scanning) "正在扫描应用…" else "没有符合当前筛选条件的应用",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+
+    private data class PolicyChoice(
+        val mode: BiometricPolicyMode,
+        val label: String,
+        val description: String,
     )
+
+    private fun defaultChoices(): List<PolicyChoice> = listOf(
+        PolicyChoice(
+            BiometricPolicyMode.ANY,
+            "系统默认（人脸或指纹）",
+            "保持 Android 原生的单因素认证行为。",
+        ),
+        PolicyChoice(
+            BiometricPolicyMode.FACE_ONLY,
+            "人脸认证",
+            "仅接受人脸识别。",
+        ),
+        PolicyChoice(
+            BiometricPolicyMode.FINGERPRINT_ONLY,
+            "指纹认证",
+            "仅接受指纹识别。",
+        ),
+        PolicyChoice(
+            BiometricPolicyMode.FACE_AND_FINGERPRINT,
+            "双重认证（人脸 + 指纹）",
+            "必须同时完成人脸和指纹认证。",
+        ),
+    )
+
+    private fun allExplicitChoices(): List<PolicyChoice> = defaultChoices()
 
     private fun modeLabel(mode: BiometricPolicyMode): String =
         when (mode) {
-            BiometricPolicyMode.ANY -> "人脸或指纹"
-            BiometricPolicyMode.FACE_ONLY -> "仅人脸"
-            BiometricPolicyMode.FINGERPRINT_ONLY -> "仅指纹"
-            BiometricPolicyMode.FACE_AND_FINGERPRINT -> "人脸 + 指纹"
+            BiometricPolicyMode.ANY -> "系统默认（人脸或指纹）"
+            BiometricPolicyMode.FACE_ONLY -> "人脸认证"
+            BiometricPolicyMode.FINGERPRINT_ONLY -> "指纹认证"
+            BiometricPolicyMode.FACE_AND_FINGERPRINT -> "双重认证（人脸 + 指纹）"
         }
+}
 
-    private fun rounded(
-        color: Int,
-        radiusDp: Float,
-        strokeColor: Int? = null,
-    ): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = dp(radiusDp).toFloat()
-            if (strokeColor != null) {
-                setStroke(dp(1), strokeColor)
+@Composable
+private fun FaceBiometricFixTheme(
+    content: @Composable () -> Unit,
+) {
+    val context = LocalContext.current
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+
+    val colors =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (dark) {
+                dynamicDarkColorScheme(context)
+            } else {
+                dynamicLightColorScheme(context)
             }
+        } else {
+            if (dark) darkColorScheme() else lightColorScheme()
         }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
-    private fun dp(value: Float): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+    MaterialTheme(
+        colorScheme = colors,
+        shapes = androidx.compose.material3.Shapes(
+            extraSmall = RoundedCornerShape(8.dp),
+            small = RoundedCornerShape(12.dp),
+            medium = RoundedCornerShape(20.dp),
+            large = RoundedCornerShape(28.dp),
+            extraLarge = RoundedCornerShape(36.dp),
+        ),
+        content = content,
+    )
 }
