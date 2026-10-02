@@ -35,7 +35,13 @@ class PolicyActivity : Activity() {
     private var scanGeneration = 0
 
     private val serviceListener: (Boolean) -> Unit = {
-        runOnUiThread { updateFrameworkStatus() }
+        runOnUiThread {
+            updateFrameworkStatus()
+            if (::adapter.isInitialized) {
+                adapter.notifyDataSetChanged()
+            }
+            updateSummary()
+        }
     }
 
     private val darkMode: Boolean
