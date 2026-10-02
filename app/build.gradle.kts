@@ -12,7 +12,7 @@ val signingProps = Properties().apply {
 android {
     namespace = "com.way.facebiometricfix"
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
 
     defaultConfig {
