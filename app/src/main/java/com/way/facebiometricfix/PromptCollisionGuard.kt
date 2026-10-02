@@ -2,6 +2,7 @@ package com.way.facebiometricfix
 
 import android.view.View
 import android.view.ViewTreeObserver
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
 /**
@@ -51,41 +52,51 @@ internal class PromptCollisionGuard(
             return
         }
 
+        // Resolve the three concrete views once. The pre-draw hot path performs
+        // only direct field checks; no resource lookup or tree traversal per frame.
+        val confirm = root.findViewById<View>(confirmId) ?: return
+        val icon = if (iconId != 0) root.findViewById<View>(iconId) else null
+        val overlay = if (overlayId != 0) root.findViewById<View>(overlayId) else null
+        if (icon == null && overlay == null) return
+
         val observer = root.viewTreeObserver
         if (!observer.isAlive) return
+
+        val rootRef = WeakReference(root)
+        val confirmRef = WeakReference(confirm)
+        val iconRef = WeakReference(icon)
+        val overlayRef = WeakReference(overlay)
 
         lateinit var preDraw: ViewTreeObserver.OnPreDrawListener
         lateinit var attach: View.OnAttachStateChangeListener
 
         fun remove() {
+            val liveRoot = rootRef.get() ?: return
             synchronized(guards) {
-                guards.remove(root)
+                guards.remove(liveRoot)
             }
             runCatching {
-                val current = root.viewTreeObserver
+                val current = liveRoot.viewTreeObserver
                 if (current.isAlive) current.removeOnPreDrawListener(preDraw)
             }
-            runCatching { root.removeOnAttachStateChangeListener(attach) }
+            runCatching { liveRoot.removeOnAttachStateChangeListener(attach) }
         }
 
         preDraw = ViewTreeObserver.OnPreDrawListener {
-            if (!root.isAttachedToWindow) {
+            val liveRoot = rootRef.get()
+            if (liveRoot == null || !liveRoot.isAttachedToWindow) {
                 remove()
                 return@OnPreDrawListener true
             }
 
-            val confirm = root.findViewById<View>(confirmId)
+            val liveConfirm = confirmRef.get()
             if (
-                confirm != null &&
-                confirm.visibility == View.VISIBLE &&
-                confirm.isEnabled
+                liveConfirm != null &&
+                liveConfirm.visibility == View.VISIBLE &&
+                liveConfirm.isEnabled
             ) {
-                if (iconId != 0) {
-                    root.findViewById<View>(iconId)?.let(::suppressVisualOnly)
-                }
-                if (overlayId != 0) {
-                    root.findViewById<View>(overlayId)?.let(::suppressVisualOnly)
-                }
+                iconRef.get()?.let(::suppressVisualOnly)
+                overlayRef.get()?.let(::suppressVisualOnly)
             }
             true
         }
@@ -102,7 +113,7 @@ internal class PromptCollisionGuard(
 
         observer.addOnPreDrawListener(preDraw)
         root.addOnAttachStateChangeListener(attach)
-        logInfo("OK: installed prompt-local biometric icon guard")
+        logInfo("OK: installed zero-scan prompt-local biometric icon guard")
     }
 
     private fun suppressVisualOnly(view: View) {
