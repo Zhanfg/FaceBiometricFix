@@ -416,16 +416,18 @@ class MainHook : XposedModule() {
     }
 
     private fun hardHideBiometricView(view: View) {
+        // IMPORTANT: keep this view in ConstraintLayout measurement/layout.
+        // ColorOS anchors the confirmation area around these wrappers. GONE
+        // removes them from layout and can stretch the prompt to almost full
+        // screen. INVISIBLE suppresses rendering while preserving geometry.
         runCatching { view.animate().cancel() }
         runCatching { view.clearAnimation() }
         runCatching { findNoArgMethod(view.javaClass, "cancelAnimation")?.invoke(view) }
         runCatching { findNoArgMethod(view.javaClass, "pauseAnimation")?.invoke(view) }
-        runCatching { findNoArgMethod(view.javaClass, "stop")?.invoke(view) }
 
         view.isClickable = false
         view.isFocusable = false
-        view.alpha = 0f
-        view.visibility = View.GONE
+        view.visibility = View.INVISIBLE
     }
 
     private fun resourceId(root: View, name: String): Int {
