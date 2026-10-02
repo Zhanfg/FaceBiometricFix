@@ -43,11 +43,10 @@ internal class DualBiometricCoordinator(
         val sessionClass: Class<*>,
         val opPackageName: Field?,
         val preAuthInfo: Field?,
+        val getEligibleModalities: Method?,
         val sensorIdToModality: Method?,
         val onStartFingerprint: Method?,
         val startFingerprintSensorsNow: Method?,
-        val pauseSensorIfSupported: Method?,
-        val cancelAllSensorsFiltered: Method?,
         val statusBarService: Field?,
     )
 
@@ -132,11 +131,11 @@ internal class DualBiometricCoordinator(
             }
         }
 
-        // Stop the face client immediately after stage 1 succeeds. Besides
-        // avoiding duplicate callbacks, this turns off the camera/face stack
-        // before UDFPS begins and is the main power win of sequential mode.
-        pauseFaceStage(session, sensorId)
-
+        // Do not cancel FACE here. AuthSession treats the resulting asynchronous
+        // BIOMETRIC_ERROR_CANCELED as a session-level cancellation while it still
+        // has no authenticated sensor. Keeping FACE alive for the short second
+        // stage is safer; the framework cancels it automatically as soon as the
+        // fingerprint succeeds. Duplicate FACE callbacks are consumed above.
         notifyFingerprintStage(session, state)
         startFingerprintStage(session, state)
 
@@ -190,6 +189,11 @@ internal class DualBiometricCoordinator(
     }
 
     private fun eligibleModalities(session: Any, handles: Handles): Int {
+        handles.getEligibleModalities?.let { method ->
+            val value = runCatching { method.invoke(session) as? Int }.getOrNull()
+            if (value != null) return value
+        }
+
         val preAuth = runCatching { handles.preAuthInfo?.get(session) }.getOrNull() ?: return 0
         val sensorsField = eligibleSensorsField(preAuth.javaClass) ?: return 0
         val sensors = runCatching { sensorsField.get(preAuth) as? Iterable<*> }
@@ -234,40 +238,6 @@ internal class DualBiometricCoordinator(
     private fun sensorModality(sensor: Any): Int {
         val field = sensorModalityField(sensor.javaClass) ?: return 0
         return runCatching { field.getInt(sensor) }.getOrDefault(0)
-    }
-
-    private fun pauseFaceStage(session: Any, sensorId: Int) {
-        val handles = handlesFor(session)
-
-        val paused = handles.pauseSensorIfSupported?.let { method ->
-            runCatching {
-                method.invoke(session, sensorId) as? Boolean
-            }.onFailure {
-                logError("DualAuth: pauseSensorIfSupported failed", it)
-            }.getOrNull()
-        } == true
-
-        if (paused) {
-            logInfo("DualAuth: FACE sensor paused after stage-1 success")
-            return
-        }
-
-        val cancelFiltered = handles.cancelAllSensorsFiltered ?: run {
-            logWarn("DualAuth: FACE cancel helper unavailable; duplicate callbacks will be ignored")
-            return
-        }
-
-        runCatching {
-            val predicate = java.util.function.Function<Any, Boolean> { sensor ->
-                val id = sensorIdField(sensor.javaClass)
-                    ?.let { field -> runCatching { field.getInt(sensor) }.getOrNull() }
-                id == sensorId
-            }
-            cancelFiltered.invoke(session, predicate)
-            logInfo("DualAuth: FACE sensor cancelled through filtered fallback")
-        }.onFailure {
-            logError("DualAuth: filtered FACE cancellation failed", it)
-        }
     }
 
     private fun startFingerprintStage(session: Any, state: SessionState) {
@@ -349,6 +319,9 @@ internal class DualBiometricCoordinator(
                 sessionClass = type,
                 opPackageName = findField(type, "mOpPackageName"),
                 preAuthInfo = findField(type, "mPreAuthInfo"),
+                getEligibleModalities = findMethod(type, "getEligibleModalities") {
+                    it.parameterTypes.isEmpty()
+                },
                 sensorIdToModality = findMethod(type, "sensorIdToModality") {
                     it.parameterTypes.size == 1 &&
                         it.parameterTypes[0] == Int::class.javaPrimitiveType
@@ -358,14 +331,6 @@ internal class DualBiometricCoordinator(
                 },
                 startFingerprintSensorsNow = findMethod(type, "startFingerprintSensorsNow") {
                     it.parameterTypes.isEmpty()
-                },
-                pauseSensorIfSupported = findMethod(type, "pauseSensorIfSupported") {
-                    it.parameterTypes.size == 1 &&
-                        it.parameterTypes[0] == Int::class.javaPrimitiveType
-                },
-                cancelAllSensorsFiltered = findMethod(type, "cancelAllSensors") {
-                    it.parameterTypes.size == 1 &&
-                        it.parameterTypes[0].name == "java.util.function.Function"
                 },
                 statusBarService = findField(type, "mStatusBarService"),
             )
