@@ -178,7 +178,13 @@ internal class DualBiometricCoordinator(
                 state.fingerprintToken = token?.clone()
             }
 
-            markSuccessfulSensorStopped(session, sensorId)
+            // Keep a first-success fingerprint in AUTHENTICATING state from
+            // AuthSession's point of view. If FACE needs an automatic retry,
+            // onTryAgainPressed() will then skip fingerprint instead of
+            // preparing it a second time. FACE can be marked stopped safely.
+            if (modality == TYPE_FACE) {
+                markSuccessfulSensorStopped(session, sensorId)
+            }
 
             val hasFace = state.verifiedMask and VERIFIED_FACE != 0
             val hasFingerprint = state.verifiedMask and VERIFIED_FINGERPRINT != 0
