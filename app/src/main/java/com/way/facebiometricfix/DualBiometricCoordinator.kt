@@ -175,7 +175,9 @@ internal class DualBiometricCoordinator(
 
         val handles = handlesFor(session)
         val packageName = readString(handles.opPackageName, session) ?: return null
-        if (!DualBiometricPolicy.isEligiblePackage(packageName)) return null
+        if (DualBiometricPolicy.modeFor(packageName) != BiometricPolicyMode.FACE_THEN_FINGERPRINT) {
+            return null
+        }
 
         val modalities = eligibleModalities(session, handles)
         val hasFace = modalities and TYPE_FACE != 0
@@ -459,21 +461,5 @@ internal class DualBiometricCoordinator(
     private companion object {
         const val TYPE_FINGERPRINT = 2
         const val TYPE_FACE = 8
-    }
-}
-
-internal object DualBiometricPolicy {
-    private val excludedPackages = setOf(
-        "android",
-        "com.android.systemui",
-        "com.coloros.codebook",
-    )
-
-    /**
-     * 2.2.5-test enables dual authentication for ordinary BiometricPrompt callers
-     * only when both FACE and FINGERPRINT are eligible in the same AuthSession.
-     */
-    fun isEligiblePackage(packageName: String): Boolean {
-        return packageName.isNotBlank() && packageName !in excludedPackages
     }
 }
