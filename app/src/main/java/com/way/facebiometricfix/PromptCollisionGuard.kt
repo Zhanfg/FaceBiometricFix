@@ -52,13 +52,6 @@ internal class PromptCollisionGuard(
             return
         }
 
-        // Resolve views once. OnPreDraw is a hot path, so avoid findViewById()
-        // tree traversal every frame.
-        val confirm = root.findViewById<View>(confirmId) ?: return
-        val icon = if (iconId != 0) root.findViewById<View>(iconId) else null
-        val overlay = if (overlayId != 0) root.findViewById<View>(overlayId) else null
-        if (icon == null && overlay == null) return
-
         // Resolve the three concrete views once. The pre-draw hot path performs
         // only direct field checks; no resource lookup or tree traversal per frame.
         val confirm = root.findViewById<View>(confirmId) ?: return
