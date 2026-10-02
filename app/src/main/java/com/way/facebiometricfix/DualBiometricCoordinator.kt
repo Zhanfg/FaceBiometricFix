@@ -35,6 +35,7 @@ internal class DualBiometricCoordinator(
     private data class SessionState(
         val packageName: String,
         var phase: Phase = Phase.WAIT_FACE,
+        var uiReady: Boolean = false,
         var fingerprintStartRequested: Boolean = false,
         var transitionMessageSent: Boolean = false,
     )
@@ -86,12 +87,35 @@ internal class DualBiometricCoordinator(
 
     fun shouldDelayFingerprint(session: Any?): Boolean {
         if (session == null) return false
-        return getOrCreateState(session)?.phase == Phase.WAIT_FACE
+        val state = getOrCreateState(session) ?: return false
+        synchronized(state) {
+            // In dual mode AuthSession never decides the initial fingerprint start.
+            // We release it only after FACE succeeds and the prompt animation is done.
+            return state.phase != Phase.COMPLETE && !state.fingerprintStartRequested
+        }
     }
 
     fun shouldBlockFingerprintStart(session: Any?): Boolean {
         if (session == null) return false
-        return getOrCreateState(session)?.phase == Phase.WAIT_FACE
+        val state = getOrCreateState(session) ?: return false
+        synchronized(state) {
+            return state.phase != Phase.COMPLETE &&
+                (state.phase != Phase.WAIT_FINGERPRINT || !state.uiReady)
+        }
+    }
+
+    fun onDialogAnimatedIn(session: Any?) {
+        if (session == null) return
+        val state = getOrCreateState(session) ?: return
+
+        val shouldAdvance = synchronized(state) {
+            state.uiReady = true
+            state.phase == Phase.WAIT_FINGERPRINT
+        }
+
+        if (shouldAdvance) {
+            advanceFingerprintStage(session, state)
+        }
     }
 
     fun onAuthenticationSucceeded(session: Any?, sensorId: Int): SuccessDecision {
@@ -136,8 +160,11 @@ internal class DualBiometricCoordinator(
         // has no authenticated sensor. Keeping FACE alive for the short second
         // stage is safer; the framework cancels it automatically as soon as the
         // fingerprint succeeds. Duplicate FACE callbacks are consumed above.
-        notifyFingerprintStage(session, state)
-        startFingerprintStage(session, state)
+        //
+        // If FACE succeeds before the prompt finishes animating, defer the
+        // fingerprint start until onDialogAnimatedIn() has completed. This
+        // preserves AOSP's rule that UDFPS must not appear before the prompt UI.
+        advanceFingerprintStage(session, state)
 
         // Deliberately do NOT call AuthSession's original success path here.
         // This avoids mAuthenticatedSensorId/mTokenEscrow being populated by FACE.
@@ -240,6 +267,16 @@ internal class DualBiometricCoordinator(
     private fun sensorModality(sensor: Any): Int {
         val field = sensorModalityField(sensor.javaClass) ?: return 0
         return runCatching { field.getInt(sensor) }.getOrDefault(0)
+    }
+
+    private fun advanceFingerprintStage(session: Any, state: SessionState) {
+        val ready = synchronized(state) {
+            state.phase == Phase.WAIT_FINGERPRINT && state.uiReady
+        }
+        if (!ready) return
+
+        notifyFingerprintStage(session, state)
+        startFingerprintStage(session, state)
     }
 
     private fun startFingerprintStage(session: Any, state: SessionState) {
