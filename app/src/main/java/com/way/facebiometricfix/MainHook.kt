@@ -94,7 +94,7 @@ class MainHook : XposedModule() {
         dualAuth.prepare(session)
 
         val args = chain.args.toTypedArray()
-        if (
+        val result = if (
             args.size == 1 &&
             args[0] is Boolean &&
             dualAuth.shouldDelayFingerprint(session)
@@ -104,6 +104,12 @@ class MainHook : XposedModule() {
         } else {
             chain.proceed()
         }
+
+        // Run only after the framework has moved AuthSession into its
+        // UI-showing state. If FACE already succeeded during the animation,
+        // this is the first safe point to start UDFPS.
+        dualAuth.onDialogAnimatedIn(session)
+        result
     }
 
     private val fingerprintStartGateHooker = XposedInterface.Hooker { chain ->
