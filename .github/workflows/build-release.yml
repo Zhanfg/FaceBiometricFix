@@ -15,6 +15,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,6 +53,7 @@ jobs:
           release_tag="v${version_name}"
           xposed_tag="${version_code}-${version_name}"
           version_changed=true
+
           if [[ "$GITHUB_EVENT_NAME" == "push" && -n "${{ github.event.before }}" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
             old_version_code=$(git show "${{ github.event.before }}:app/build.gradle.kts" 2>/dev/null | sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' || true)
             old_version_name=$(git show "${{ github.event.before }}:app/build.gradle.kts" 2>/dev/null | sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' || true)
@@ -63,67 +65,93 @@ jobs:
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "xposed_tag=$xposed_tag" >> "$GITHUB_OUTPUT"
           echo "version_changed=$version_changed" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $release_tag (Xposed: $xposed_tag); version changed: $version_changed"
+          echo "Release tag: $release_tag; version changed: $version_changed"
 
       - name: Stop when software version did not change
         if: steps.version.outputs.version_changed != 'true'
         run: echo "No version change; release skipped."
 
-      - name: Restore signing configuration
+      - name: Prepare signing
         if: steps.version.outputs.version_changed == 'true'
+        id: signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
         run: |
           set -euo pipefail
-          : "${KEYSTORE_BASE64:?ANDROID_KEYSTORE_BASE64 is not configured}"
-          : "${KEYSTORE_PASSWORD:?ANDROID_KEYSTORE_PASSWORD is not configured}"
-          : "${KEY_ALIAS:?ANDROID_KEY_ALIAS is not configured}"
-          : "${KEY_PASSWORD:?ANDROID_KEY_PASSWORD is not configured}"
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-          cat > signing.properties <<EOF
+
+          if [[ -n "$KEYSTORE_BASE64" && -n "$KEYSTORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+            cat > signing.properties <<EOF
           storeFile=$RUNNER_TEMP/release.keystore
           storePassword=$KEYSTORE_PASSWORD
           keyAlias=$KEY_ALIAS
           keyPassword=$KEY_PASSWORD
           EOF
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "Using persistent release signing configuration."
+          else
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+            echo "::warning::Release signing secrets are not configured; publishing a debug-signed APK for this fork."
+          fi
 
-      - name: Build release APK
+      - name: Build APK
         if: steps.version.outputs.version_changed == 'true'
-        run: |
-          chmod +x gradlew
-          ./gradlew :app:assembleRelease --stacktrace
-
-      - name: Prepare signed APK
-        if: steps.version.outputs.version_changed == 'true'
+        shell: bash
         run: |
           set -euo pipefail
-          apk_name="FaceBiometricFix-${{ steps.version.outputs.xposed_tag }}.apk"
-          cp app/build/outputs/apk/release/app-release.apk "$apk_name"
+          chmod +x gradlew
+          if [[ "${{ steps.signing.outputs.mode }}" == "release" ]]; then
+            ./gradlew :app:assembleRelease --stacktrace
+          else
+            ./gradlew :app:assembleDebug --stacktrace
+          fi
+
+      - name: Prepare APK
+        if: steps.version.outputs.version_changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk_name="FaceBiometricFix-${{ steps.version.outputs.version_name }}.apk"
+
+          if [[ "${{ steps.signing.outputs.mode }}" == "release" ]]; then
+            source_apk="app/build/outputs/apk/release/app-release.apk"
+          else
+            source_apk="app/build/outputs/apk/debug/app-debug.apk"
+          fi
+
+          cp "$source_apk" "$apk_name"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$apk_name"
+
+          sha256sum "$apk_name" | tee "${apk_name}.sha256"
           echo "APK_NAME=$apk_name" >> "$GITHUB_ENV"
+          echo "APK_SHA256_FILE=${apk_name}.sha256" >> "$GITHUB_ENV"
 
       - name: Sync Xposed repository metadata
         if: steps.version.outputs.version_changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          : "${GH_TOKEN:?XPOSED_REPO_TOKEN is not configured}"
+
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "XPOSED_REPO_TOKEN is not configured; skipping Xposed repository sync."
+            exit 0
+          fi
+
           target_dir="$RUNNER_TEMP/xposed-repository"
-          # Embed token in URL so Actions secret masking cannot break the credential.
           git clone "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_REPOSITORY.git" "$target_dir"
-          # Replace remote URL with a token-authenticated one for push as well.
-          git -C "$target_dir" remote set-url origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_REPOSITORY.git"
-          # README.md is the shared source; the Xposed repository keeps its own
-          # SUMMARY/SCOPE/SOURCE_URL metadata because the nested checkout is ignored.
+          git -C "$target_dir" remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_REPOSITORY.git"
+
           cp README.md LICENSE "$target_dir/"
           git -C "$target_dir" config user.name "github-actions[bot]"
           git -C "$target_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C "$target_dir" add README.md LICENSE
+
           if git -C "$target_dir" diff --cached --quiet; then
             echo "Xposed metadata is already current."
           else
@@ -135,14 +163,17 @@ jobs:
         if: steps.version.outputs.version_changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
+
           release_tag="${{ steps.version.outputs.release_tag }}"
-          gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && {
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $release_tag already exists in $GITHUB_REPOSITORY" >&2
             exit 1
-          } || true
-          gh release create "$release_tag" "$APK_NAME" \
+          fi
+
+          gh release create "$release_tag" "$APK_NAME" "$APK_SHA256_FILE" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$release_tag" \
             --generate-notes
@@ -151,15 +182,22 @@ jobs:
         if: steps.version.outputs.version_changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          : "${GH_TOKEN:?XPOSED_REPO_TOKEN is not configured}"
+
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "XPOSED_REPO_TOKEN is not configured; skipping Xposed repository release."
+            exit 0
+          fi
+
           xposed_tag="${{ steps.version.outputs.xposed_tag }}"
-          gh release view "$xposed_tag" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1 && {
+          if gh release view "$xposed_tag" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $xposed_tag already exists in $TARGET_REPOSITORY" >&2
             exit 1
-          } || true
-          gh release create "$xposed_tag" "$APK_NAME" \
+          fi
+
+          gh release create "$xposed_tag" "$APK_NAME" "$APK_SHA256_FILE" \
             --repo "$TARGET_REPOSITORY" \
             --title "$xposed_tag" \
             --generate-notes

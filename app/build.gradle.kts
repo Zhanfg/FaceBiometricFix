@@ -19,8 +19,8 @@ android {
         applicationId = "com.way.facebiometricfix"
         minSdk = 35
         targetSdk = 36
-        versionCode = 4
-        versionName = "2.1"
+        versionCode = 9
+        versionName = "2.2.4"
 
     }
 
