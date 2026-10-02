@@ -1,10 +1,6 @@
 package com.way.facebiometricfix
 
-import android.graphics.Typeface
-import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import java.lang.ref.WeakReference
@@ -28,7 +24,6 @@ internal class PromptCollisionGuard(
     )
 
     private val guards = WeakHashMap<View, Guard>()
-    private val verifiedBadges = WeakHashMap<View, TextView>()
 
     fun onFaceAuthenticated(authController: Any?) {
         if (authController == null) return
@@ -49,24 +44,16 @@ internal class PromptCollisionGuard(
         val root = findCurrentDialogView(authController) ?: return
         updateIndicator(root, message)
 
-        when (state) {
-            DualBiometricCoordinator.UI_STATE_FINGERPRINT_VERIFIED -> {
-                // Fingerprint is already the completed first factor: stop the
-                // UDFPS affordance and replace its prompt icon with a check mark.
-                runCatching { hideUdfpsOverlay(authController) }
-                    .onFailure { logError("FAIL: hide UDFPS after fingerprint factor", it) }
-                showVerifiedBadge(root)
-            }
-
-            DualBiometricCoordinator.UI_STATE_WAIT_BOTH,
-            DualBiometricCoordinator.UI_STATE_FACE_VERIFIED,
-            -> clearVerifiedBadge(root)
-
-            DualBiometricCoordinator.UI_STATE_COMPLETE -> {
-                // Keep a previously shown check until the dialog dismisses.
-            }
+        if (state == DualBiometricCoordinator.UI_STATE_FINGERPRINT_VERIFIED) {
+            // The first implementation drew our own TextView check mark. Do not do that:
+            // use the exact SystemUI biometric success Lottie asset on the existing native
+            // biometric_icon view, and do nothing if this ROM does not expose that asset.
+            runCatching { hideUdfpsOverlay(authController) }
+                .onFailure { logError("FAIL: hide UDFPS after fingerprint factor", it) }
+            playNativeFingerprintSuccess(root)
         }
     }
+
     fun showNeutralGuidance(authController: Any?, message: String) {
         if (authController == null || message.isBlank()) return
         val root = findCurrentDialogView(authController) ?: return
@@ -87,70 +74,67 @@ internal class PromptCollisionGuard(
         }
     }
 
-    private fun showVerifiedBadge(root: View) {
-        val host = root as? ViewGroup ?: return
+    private fun playNativeFingerprintSuccess(root: View) {
         val iconId = resourceId(root, "biometric_icon")
-        val overlayId = resourceId(root, "biometric_icon_overlay")
-        val icon = if (iconId != 0) root.findViewById<View>(iconId) else null
-        val iconOverlay = if (overlayId != 0) root.findViewById<View>(overlayId) else null
-        val target = icon ?: iconOverlay ?: return
+        if (iconId == 0) return
+        val icon = root.findViewById<View>(iconId) ?: return
 
-        icon?.let(::suppressVisualOnly)
-        iconOverlay?.let(::suppressVisualOnly)
+        // This is the same AOSP/SystemUI asset selected by PromptIconViewModel for
+        // a successful coex/UDFPS fingerprint authentication. We deliberately do
+        // not synthesize or draw any check mark ourselves.
+        val successAsset = runCatching {
+            root.resources.getIdentifier(
+                "fingerprint_dialogue_fingerprint_to_success_lottie",
+                "raw",
+                SYSTEM_UI_PACKAGE,
+            )
+        }.getOrDefault(0)
 
-        val badge = synchronized(verifiedBadges) {
-            verifiedBadges[root] ?: TextView(root.context).also {
-                verifiedBadges[root] = it
+        if (successAsset == 0) {
+            logWarn("Native fingerprint success Lottie unavailable; leaving SystemUI icon untouched")
+            return
+        }
+
+        val setAnimation = findMethod(icon.javaClass, "setAnimation") {
+            val p = it.parameterTypes
+            p.size == 1 && p[0] == Int::class.javaPrimitiveType
+        } ?: run {
+            logWarn("Native biometric icon has no setAnimation(int); leaving it untouched")
+            return
+        }
+
+        runCatching {
+            findNoArgMethod(icon.javaClass, "pauseAnimation")?.invoke(icon)
+            setAnimation.invoke(icon, successAsset)
+            findMethod(icon.javaClass, "setFrame") {
+                val p = it.parameterTypes
+                p.size == 1 && p[0] == Int::class.javaPrimitiveType
+            }?.invoke(icon, 0)
+            findMethod(icon.javaClass, "setRepeatCount") {
+                val p = it.parameterTypes
+                p.size == 1 && p[0] == Int::class.javaPrimitiveType
+            }?.invoke(icon, 0)
+
+            val authenticatedTextId = root.resources.getIdentifier(
+                "biometric_dialog_authenticated",
+                "string",
+                SYSTEM_UI_PACKAGE,
+            )
+            if (authenticatedTextId != 0) {
+                icon.contentDescription = root.resources.getString(authenticatedTextId)
             }
+
+            icon.visibility = View.VISIBLE
+            icon.isClickable = false
+            icon.isFocusable = false
+            findNoArgMethod(icon.javaClass, "playAnimation")?.invoke(icon)
+        }.onSuccess {
+            logInfo("OK: native SystemUI fingerprint success animation shown")
+        }.onFailure {
+            logError("FAIL: native SystemUI fingerprint success animation", it)
         }
-
-        val targetLocation = IntArray(2)
-        val rootLocation = IntArray(2)
-        target.getLocationInWindow(targetLocation)
-        root.getLocationInWindow(rootLocation)
-
-        val width = target.width.coerceAtLeast(1)
-        val height = target.height.coerceAtLeast(1)
-        val left = targetLocation[0] - rootLocation[0]
-        val top = targetLocation[1] - rootLocation[1]
-
-        badge.text = "✓"
-        badge.gravity = Gravity.CENTER
-        badge.typeface = Typeface.DEFAULT_BOLD
-        badge.setTextSize(TypedValue.COMPLEX_UNIT_PX, height * 0.58f)
-        badge.contentDescription = "已经过身份验证"
-        badge.isClickable = false
-        badge.isFocusable = false
-        badge.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-
-        val accent = TypedValue()
-        if (root.context.theme.resolveAttribute(android.R.attr.colorAccent, accent, true)) {
-            badge.setTextColor(accent.data)
-        } else {
-            val indicatorId = resourceId(root, "indicator")
-            val indicator = if (indicatorId != 0) root.findViewById<TextView>(indicatorId) else null
-            indicator?.let { badge.setTextColor(it.currentTextColor) }
-        }
-
-        if (!badge.isAttachedToWindow) {
-            host.overlay.add(badge)
-        }
-        badge.measure(
-            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
-        )
-        badge.layout(left, top, left + width, top + height)
-        badge.visibility = View.VISIBLE
-        logInfo("OK: fingerprint first-factor check mark shown")
     }
 
-    private fun clearVerifiedBadge(root: View) {
-        val host = root as? ViewGroup ?: return
-        val badge = synchronized(verifiedBadges) {
-            verifiedBadges.remove(root)
-        } ?: return
-        runCatching { host.overlay.remove(badge) }
-    }
     private fun install(root: View) {
         synchronized(guards) {
             if (guards.containsKey(root)) return
@@ -314,6 +298,24 @@ internal class PromptCollisionGuard(
         return runCatching {
             root.resources.getIdentifier(name, "id", SYSTEM_UI_PACKAGE)
         }.getOrDefault(0)
+    }
+
+    private fun findMethod(
+        type: Class<*>,
+        name: String,
+        predicate: (java.lang.reflect.Method) -> Boolean,
+    ): java.lang.reflect.Method? {
+        var current: Class<*>? = type
+        while (current != null) {
+            current.declaredMethods.firstOrNull {
+                it.name == name && predicate(it)
+            }?.let { method ->
+                method.isAccessible = true
+                return method
+            }
+            current = current.superclass
+        }
+        return null
     }
 
     private fun findNoArgMethod(type: Class<*>, name: String): java.lang.reflect.Method? {
