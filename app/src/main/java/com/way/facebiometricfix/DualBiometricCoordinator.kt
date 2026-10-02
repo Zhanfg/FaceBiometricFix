@@ -629,19 +629,12 @@ internal class DualBiometricCoordinator(
                     it.parameterTypes.size == 1 &&
                         it.parameterTypes[0] == Int::class.javaPrimitiveType
                 },
-                onStartFingerprint = findMethod(type, "onStartFingerprint") {
-                    it.parameterTypes.isEmpty()
-                },
-                startFingerprintSensorsNow = findMethod(type, "startFingerprintSensorsNow") {
-                    it.parameterTypes.isEmpty()
-                },
-                startAllPreparedFingerprintSensors =
-                    findMethod(type, "startAllPreparedFingerprintSensors") {
-                        it.parameterTypes.isEmpty()
-                    },
                 pauseSensorIfSupported = findMethod(type, "pauseSensorIfSupported") {
                     it.parameterTypes.size == 1 &&
                         it.parameterTypes[0] == Int::class.javaPrimitiveType
+                },
+                onTryAgainPressed = findMethod(type, "onTryAgainPressed") {
+                    it.parameterTypes.isEmpty()
                 },
                 onCancelAuthSession = findMethod(type, "onCancelAuthSession") {
                     it.parameterTypes.size == 1 &&
@@ -650,6 +643,7 @@ internal class DualBiometricCoordinator(
                 cancelAllSensors = findMethod(type, "cancelAllSensors") {
                     it.parameterTypes.isEmpty()
                 },
+                statusBarService = findField(type, "mStatusBarService"),
             )
             cachedHandles = handles
             return handles
@@ -733,6 +727,40 @@ internal class DualBiometricCoordinator(
         }
     }
 
+    private fun sensorCookieMethod(type: Class<*>): Method? {
+        cachedSensorCookieMethod?.let {
+            if (cachedSensorCookieClass === type) return it
+        }
+        synchronized(this) {
+            cachedSensorCookieMethod?.let {
+                if (cachedSensorCookieClass === type) return it
+            }
+            val method = findMethod(type, "getCookie") { it.parameterTypes.isEmpty() }
+            cachedSensorCookieClass = type
+            cachedSensorCookieMethod = method
+            return method
+        }
+    }
+
+    private fun statusBarHelpMethod(type: Class<*>): Method? {
+        cachedStatusBarHelp?.let {
+            if (cachedStatusBarClass === type) return it
+        }
+        synchronized(this) {
+            cachedStatusBarHelp?.let {
+                if (cachedStatusBarClass === type) return it
+            }
+            val method = findMethod(type, "onBiometricHelp") {
+                val p = it.parameterTypes
+                p.size == 2 &&
+                    p[0] == Int::class.javaPrimitiveType &&
+                    p[1] == String::class.java
+            }
+            cachedStatusBarClass = type
+            cachedStatusBarHelp = method
+            return method
+        }
+    }
     private fun findField(type: Class<*>, name: String): Field? {
         var current: Class<*>? = type
         while (current != null) {
@@ -768,9 +796,14 @@ internal class DualBiometricCoordinator(
         return runCatching { field?.get(owner) as? String }.getOrNull()
     }
 
-    private companion object {
+    companion object {
         const val TYPE_FINGERPRINT = 2
         const val TYPE_FACE = 8
-        const val FINGERPRINT_STAGE_TIMEOUT_MS = 15_000L
+        const val NEUTRAL_GUIDANCE_PREFIX = "__FBF_NEUTRAL__:"
+
+        private const val VERIFIED_FINGERPRINT = 1
+        private const val VERIFIED_FACE = 1 shl 1
+        private const val BIOMETRIC_SUCCESS = 0
+        private const val SECOND_FACTOR_TIMEOUT_MS = 30_000L
     }
 }
