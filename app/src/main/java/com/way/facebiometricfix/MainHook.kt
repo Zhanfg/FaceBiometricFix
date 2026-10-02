@@ -89,6 +89,61 @@ class MainHook : XposedModule() {
         }
     }
 
+    private val authSessionErrorHooker = XposedInterface.Hooker { chain ->
+        val session = chain.thisObject
+        val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
+        val cookie = runCatching { chain.getArg(1) as? Int }.getOrNull()
+        val error = runCatching { chain.getArg(2) as? Int }.getOrNull()
+
+        if (sensorId == null || cookie == null || error == null) {
+            return@Hooker chain.proceed()
+        }
+
+        when (dualAuth.beforeErrorReceived(session, sensorId, cookie, error)) {
+            DualBiometricCoordinator.ErrorDecision.CONSUME_FALSE -> false
+            DualBiometricCoordinator.ErrorDecision.PROCEED -> {
+                val result = chain.proceed()
+                dualAuth.afterErrorReceived(
+                    session,
+                    sensorId,
+                    error,
+                    result as? Boolean == true,
+                )
+                result
+            }
+        }
+    }
+
+    private val authSessionRejectedHooker = XposedInterface.Hooker { chain ->
+        val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
+        if (
+            sensorId != null &&
+            dualAuth.shouldConsumeRejected(chain.thisObject, sensorId)
+        ) {
+            null
+        } else {
+            chain.proceed()
+        }
+    }
+
+    private val authSessionTimedOutHooker = XposedInterface.Hooker { chain ->
+        val session = chain.thisObject
+        val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
+
+        if (
+            sensorId != null &&
+            dualAuth.shouldConsumeTimeout(session, sensorId)
+        ) {
+            null
+        } else {
+            val result = chain.proceed()
+            if (sensorId != null) {
+                dualAuth.afterAuthenticationTimedOut(session, sensorId)
+            }
+            result
+        }
+    }
+
     private val authSessionDialogAnimatedHooker = XposedInterface.Hooker { chain ->
         val session = chain.thisObject
         dualAuth.prepare(session)
@@ -235,6 +290,52 @@ class MainHook : XposedModule() {
                 .intercept(authSessionSuccessHooker)
 
             authSessionClass.declaredMethods
+                .firstOrNull {
+                    it.name == "onErrorReceived" &&
+                        it.parameterTypes.size == 4 &&
+                        it.parameterTypes.all { type ->
+                            type == Int::class.javaPrimitiveType
+                        }
+                }
+                ?.let { method ->
+                    method.isAccessible = true
+                    hook(method)
+                        .setId(HOOK_ID_AUTH_SESSION_ERROR)
+                        .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                        .intercept(authSessionErrorHooker)
+                }
+
+            authSessionClass.declaredMethods
+                .firstOrNull {
+                    it.name == "onAuthenticationRejected" &&
+                        it.parameterTypes.size == 1 &&
+                        it.parameterTypes[0] == Int::class.javaPrimitiveType
+                }
+                ?.let { method ->
+                    method.isAccessible = true
+                    hook(method)
+                        .setId(HOOK_ID_AUTH_SESSION_REJECTED)
+                        .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                        .intercept(authSessionRejectedHooker)
+                }
+
+            authSessionClass.declaredMethods
+                .firstOrNull {
+                    it.name == "onAuthenticationTimedOut" &&
+                        it.parameterTypes.size == 4 &&
+                        it.parameterTypes.all { type ->
+                            type == Int::class.javaPrimitiveType
+                        }
+                }
+                ?.let { method ->
+                    method.isAccessible = true
+                    hook(method)
+                        .setId(HOOK_ID_AUTH_SESSION_TIMEOUT)
+                        .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                        .intercept(authSessionTimedOutHooker)
+                }
+
+            authSessionClass.declaredMethods
                 .filter {
                     it.name == "onDialogAnimatedIn" &&
                         (
@@ -272,7 +373,8 @@ class MainHook : XposedModule() {
                 .filter {
                     it.name == "onDialogDismissed" ||
                         it.name == "onCancelAuthSession" ||
-                        it.name == "onClientDied"
+                        it.name == "onClientDied" ||
+                        it.name == "onDeviceCredentialPressed"
                 }
                 .forEachIndexed { index, method ->
                     method.isAccessible = true
@@ -358,6 +460,9 @@ class MainHook : XposedModule() {
         private const val HOOK_ID_FACE_STRENGTH_CHECK = "hook_face_strength_check"
         private const val HOOK_ID_SYSTEMUI_AUTH_SUCCESS = "hook_systemui_auth_success"
         private const val HOOK_ID_AUTH_SESSION_SUCCESS = "hook_authsession_success"
+        private const val HOOK_ID_AUTH_SESSION_ERROR = "hook_authsession_error"
+        private const val HOOK_ID_AUTH_SESSION_REJECTED = "hook_authsession_rejected"
+        private const val HOOK_ID_AUTH_SESSION_TIMEOUT = "hook_authsession_timeout"
         private const val HOOK_ID_AUTH_SESSION_DIALOG = "hook_authsession_dialog"
         private const val HOOK_ID_AUTH_SESSION_FP_GATE = "hook_authsession_fp_gate"
         private const val HOOK_ID_AUTH_SESSION_CLEANUP = "hook_authsession_cleanup"
