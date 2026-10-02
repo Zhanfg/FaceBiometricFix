@@ -31,8 +31,8 @@ OUT="/sdcard/Download/FaceBiometricFix_DualAuth_${TS}.txt"
 
   echo "=== DualAuth / AuthSession context ==="
   logcat -d -v threadtime 2>/dev/null \
-    | grep -a -i -E "DualAuth|BiometricService/AuthSession|onDialogAnimatedIn|onStartFingerprint|onAuthenticationSucceeded|onBiometricHelp|Udfps|FingerprintService|FaceService" \
-    | tail -n 2400
+    | grep -a -i -E "DualAuth|BiometricService/AuthSession|onDialogAnimatedIn|onStartFingerprint|onAuthenticationSucceeded|onAuthenticationTimedOut|onAuthenticationRejected|onErrorReceived|onCancelAuthSession|onClientDied|onDeviceCredentialPressed|Udfps|FingerprintService|FaceService" \
+    | tail -n 2800
   echo
 
   echo "=== LSPosed module log fragments ==="
