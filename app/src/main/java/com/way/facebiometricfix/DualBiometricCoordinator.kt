@@ -36,7 +36,6 @@ internal class DualBiometricCoordinator(
         var phase: Phase = Phase.WAIT_FACE,
         var uiReady: Boolean = false,
         var fingerprintStartRequested: Boolean = false,
-        var transitionMessageSent: Boolean = false,
     )
 
     private data class Handles(
@@ -275,7 +274,9 @@ internal class DualBiometricCoordinator(
         }
         if (!ready) return
 
-        notifyFingerprintStage(session, state)
+        // Do not send the stage transition through IStatusBarService#onBiometricHelp.
+        // ColorOS maps "help" to a warning/error visual state (the exclamation icon).
+        // Let the native fingerprint stage own the normal affordance instead.
         startFingerprintStage(session, state)
     }
 
@@ -323,22 +324,6 @@ internal class DualBiometricCoordinator(
             localized(
                 zh = "指纹阶段无法启动，请取消后重试",
                 en = "Fingerprint stage unavailable. Cancel and retry.",
-            ),
-        )
-    }
-
-    private fun notifyFingerprintStage(session: Any, state: SessionState) {
-        synchronized(state) {
-            if (state.transitionMessageSent) return
-            state.transitionMessageSent = true
-        }
-
-        notifyStage(
-            session,
-            TYPE_FINGERPRINT,
-            localized(
-                zh = "面部识别成功，请验证指纹以继续",
-                en = "Face verified. Verify fingerprint to continue.",
             ),
         )
     }
