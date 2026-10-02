@@ -43,6 +43,12 @@ internal class DualBiometricCoordinator(
         CONSUME_FALSE,
     }
 
+    private enum class FaceErrorRecovery {
+        NONE,
+        CONSUME_ONLY,
+        REARM,
+    }
+
     private enum class Phase {
         WAIT_BOTH,
         WAIT_FACE,
@@ -235,21 +241,35 @@ internal class DualBiometricCoordinator(
         val state = findState(session) ?: return ErrorDecision.PROCEED
         if (sensorModality(session, sensorId) != TYPE_FACE) return ErrorDecision.PROCEED
 
-        val shouldConsume = synchronized(state) {
-            state.faceRestartPending ||
-                state.verifiedMask and VERIFIED_FACE != 0
+        val recovery = synchronized(state) {
+            val waitingForFace =
+                state.phase == Phase.WAIT_BOTH || state.phase == Phase.WAIT_FACE
+            val fingerprintAlreadyVerified =
+                state.verifiedMask and VERIFIED_FINGERPRINT != 0
+
+            when {
+                state.faceRestartPending && waitingForFace -> FaceErrorRecovery.REARM
+                state.verifiedMask and VERIFIED_FACE != 0 -> FaceErrorRecovery.CONSUME_ONLY
+                waitingForFace &&
+                    fingerprintAlreadyVerified &&
+                    (error == BIOMETRIC_ERROR_CANCELED ||
+                        error == BIOMETRIC_ERROR_TIMEOUT) -> FaceErrorRecovery.REARM
+                else -> FaceErrorRecovery.NONE
+            }
         }
-        if (!shouldConsume) return ErrorDecision.PROCEED
+        if (recovery == FaceErrorRecovery.NONE) return ErrorDecision.PROCEED
 
         markSensorStopped(session, sensorId, cookie, error)
         val restart = synchronized(state) {
-            val pending = state.faceRestartPending &&
-                (state.phase == Phase.WAIT_BOTH || state.phase == Phase.WAIT_FACE)
             state.faceRestartPending = false
-            pending
+            recovery == FaceErrorRecovery.REARM &&
+                (state.phase == Phase.WAIT_BOTH || state.phase == Phase.WAIT_FACE)
         }
 
         if (restart) {
+            // ColorOS may stop FACE after fingerprint wins the first-factor race.
+            // Since the fingerprint success is intentionally held by our 2-of-2
+            // state machine, that FACE cancellation is recoverable, not terminal.
             postFaceRetry(session, state)
         }
 
@@ -834,6 +854,8 @@ internal class DualBiometricCoordinator(
         private const val VERIFIED_FINGERPRINT = 1
         private const val VERIFIED_FACE = 1 shl 1
         private const val BIOMETRIC_SUCCESS = 0
+        private const val BIOMETRIC_ERROR_TIMEOUT = 3
+        private const val BIOMETRIC_ERROR_CANCELED = 5
         private const val SECOND_FACTOR_TIMEOUT_MS = 30_000L
     }
 }
