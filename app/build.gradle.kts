@@ -2,6 +2,7 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.compose.compiler)
 }
 
 val signingProps = Properties().apply {
@@ -19,8 +20,8 @@ android {
         applicationId = "com.way.facebiometricfix"
         minSdk = 35
         targetSdk = 36
-        versionCode = 9
-        versionName = "2.2.4"
+        versionCode = 10
+        versionName = "2.2.5-test"
 
     }
 
@@ -41,6 +42,10 @@ android {
             }
         }
     }
+    buildFeatures {
+        compose = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -49,4 +54,10 @@ android {
 
 dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("io.github.libxposed:service:101.0.0")
+
+    implementation("androidx.activity:activity-compose:1.12.4")
+    implementation("androidx.compose.ui:ui:1.11.4")
+    implementation("androidx.compose.foundation:foundation:1.11.4")
+    implementation("androidx.compose.material3:material3:1.4.0")
 }
