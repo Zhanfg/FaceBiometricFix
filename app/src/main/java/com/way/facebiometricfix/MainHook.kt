@@ -394,7 +394,14 @@ class MainHook : XposedModule() {
                 }
 
             authSessionClass.declaredMethods
-                .filter { it.name == "onStartFingerprint" && it.parameterTypes.isEmpty() }
+                .filter {
+                    (
+                        it.name == "onStartFingerprint" ||
+                            it.name == "startFingerprintSensorsNow" ||
+                            it.name == "startAllPreparedFingerprintSensors"
+                        ) &&
+                        it.parameterTypes.isEmpty()
+                }
                 .forEachIndexed { index, method ->
                     method.isAccessible = true
                     hook(method)
