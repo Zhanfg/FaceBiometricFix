@@ -131,7 +131,7 @@ class PolicyActivity : Activity() {
             setTextColor(secondaryText)
             textSize = 12f
             setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = rounded(
+            this.background = rounded(
                 if (darkMode) Color.rgb(38, 39, 44) else Color.rgb(235, 238, 244),
                 12f,
             )
@@ -168,7 +168,7 @@ class PolicyActivity : Activity() {
             setTextColor(primaryText)
             setHintTextColor(secondaryText)
             setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = rounded(
+            this.background = rounded(
                 if (darkMode) Color.rgb(31, 32, 36) else Color.WHITE,
                 14f,
                 strokeColor = panelStroke,
@@ -201,7 +201,7 @@ class PolicyActivity : Activity() {
         val batchPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = rounded(panelColor, 14f, panelStroke)
+            this.background = rounded(panelColor, 14f, panelStroke)
         }
 
         val selectionRow = LinearLayout(this).apply {
@@ -446,7 +446,7 @@ class PolicyActivity : Activity() {
             val root = LinearLayout(this@PolicyActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(14), dp(14), dp(14), dp(12))
-                background = rounded(cardColor, 18f)
+                this.background = rounded(cardColor, 18f)
             }
 
             val top = LinearLayout(this@PolicyActivity).apply {
