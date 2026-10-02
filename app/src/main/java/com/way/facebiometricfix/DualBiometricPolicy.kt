@@ -68,11 +68,10 @@ internal object DualBiometricPolicy {
                 val packageName = key.removePrefix(PolicyConfig.KEY_PREFIX)
                 if (packageName.isBlank()) return@OnSharedPreferenceChangeListener
 
-                val mode = PolicyConfig.parse(prefs.getString(key, null))
-                if (mode == BiometricPolicyMode.ANY) {
+                if (!prefs.contains(key)) {
                     modes.remove(packageName)
                 } else {
-                    modes[packageName] = mode
+                    modes[packageName] = PolicyConfig.parse(prefs.getString(key, null))
                 }
             }
         }
@@ -97,7 +96,7 @@ internal object DualBiometricPolicy {
             if (!key.startsWith(PolicyConfig.KEY_PREFIX)) return@forEach
             val packageName = key.removePrefix(PolicyConfig.KEY_PREFIX)
             val mode = PolicyConfig.parse(value as? String)
-            if (packageName.isNotBlank() && mode != BiometricPolicyMode.ANY) {
+            if (packageName.isNotBlank()) {
                 modes[packageName] = mode
             }
         }
@@ -110,7 +109,9 @@ internal object DualBiometricPolicy {
             return BiometricPolicyMode.ANY
         }
 
-        modes[packageName]?.let { return it }
+        if (modes.containsKey(packageName)) {
+            return modes[packageName] ?: BiometricPolicyMode.ANY
+        }
         return if (packageName in managedPackages) defaultMode else BiometricPolicyMode.ANY
     }
 
