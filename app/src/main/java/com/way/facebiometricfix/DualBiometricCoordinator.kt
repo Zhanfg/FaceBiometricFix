@@ -427,15 +427,21 @@ internal class DualBiometricCoordinator(
         }
         if (!shouldRestart) return
 
-        sendNeutralGuidance(
-            session,
-            state,
-            if (state.verifiedMask and VERIFIED_FINGERPRINT != 0) {
-                "指纹已验证，请面向屏幕完成人脸识别"
-            } else {
-                "请完成人脸和指纹验证，顺序不限；正在重新扫描人脸"
-            },
-        )
+        if (state.verifiedMask and VERIFIED_FINGERPRINT != 0) {
+            sendUiState(
+                session,
+                state,
+                UI_STATE_FINGERPRINT_VERIFIED,
+                "指纹已验证，请面向屏幕完成人脸识别；正在重新扫描人脸",
+            )
+        } else {
+            sendUiState(
+                session,
+                state,
+                UI_STATE_WAIT_BOTH,
+                "请完成人脸和指纹验证，顺序不限；正在重新扫描人脸",
+            )
+        }
 
         val pause = handlesFor(session).pauseSensorIfSupported
         val requested = runCatching {
@@ -483,27 +489,41 @@ internal class DualBiometricCoordinator(
     }
 
     private fun sendGuidanceForCurrentState(session: Any, state: SessionState) {
-        val message = synchronized(state) {
+        val snapshot = synchronized(state) {
             if (!state.uiReady) return
             when (state.phase) {
-                Phase.WAIT_BOTH -> "请完成人脸和指纹验证，顺序不限"
-                Phase.WAIT_FACE -> "指纹已验证，请完成人脸识别"
-                Phase.WAIT_FINGERPRINT -> "人脸已验证，请验证指纹"
-                Phase.COMPLETE -> "双重认证完成"
+                Phase.WAIT_BOTH -> Pair(
+                    UI_STATE_WAIT_BOTH,
+                    "请完成人脸和指纹验证，顺序不限",
+                )
+                Phase.WAIT_FACE -> Pair(
+                    UI_STATE_FINGERPRINT_VERIFIED,
+                    "指纹已验证，请完成人脸识别",
+                )
+                Phase.WAIT_FINGERPRINT -> Pair(
+                    UI_STATE_FACE_VERIFIED,
+                    "人脸已验证，请验证指纹",
+                )
+                Phase.COMPLETE -> Pair(
+                    UI_STATE_COMPLETE,
+                    "双重认证完成",
+                )
                 Phase.ABORTING, Phase.TERMINATED -> return
             }
         }
-        sendNeutralGuidance(session, state, message)
+        sendUiState(session, state, snapshot.first, snapshot.second)
     }
 
-    private fun sendNeutralGuidance(
+    private fun sendUiState(
         session: Any,
         state: SessionState,
+        uiState: String,
         message: String,
     ) {
+        val payload = "$uiState|$message"
         synchronized(state) {
-            if (!state.uiReady || state.lastGuidance == message) return
-            state.lastGuidance = message
+            if (!state.uiReady || state.lastGuidance == payload) return
+            state.lastGuidance = payload
         }
 
         val handles = handlesFor(session)
@@ -512,12 +532,11 @@ internal class DualBiometricCoordinator(
         val method = statusBarHelpMethod(statusBar.javaClass) ?: return
 
         runCatching {
-            method.invoke(statusBar, TYPE_FACE, NEUTRAL_GUIDANCE_PREFIX + message)
+            method.invoke(statusBar, TYPE_FACE, UI_STATE_PREFIX + payload)
         }.onFailure {
-            logError("DualAuth: failed to send neutral guidance", it)
+            logError("DualAuth: failed to send UI state", it)
         }
     }
-
     private fun scheduleSecondFactorDeadlineLocked(session: Any, state: SessionState) {
         cancelDeadlineLocked(state)
         if (state.phase != Phase.WAIT_FACE && state.phase != Phase.WAIT_FINGERPRINT) return
@@ -806,6 +825,11 @@ internal class DualBiometricCoordinator(
         const val TYPE_FINGERPRINT = 2
         const val TYPE_FACE = 8
         const val NEUTRAL_GUIDANCE_PREFIX = "__FBF_NEUTRAL__:"
+        const val UI_STATE_PREFIX = "__FBF_UI_STATE__:"
+        const val UI_STATE_WAIT_BOTH = "WAIT_BOTH"
+        const val UI_STATE_FINGERPRINT_VERIFIED = "FP_OK"
+        const val UI_STATE_FACE_VERIFIED = "FACE_OK"
+        const val UI_STATE_COMPLETE = "COMPLETE"
 
         private const val VERIFIED_FINGERPRINT = 1
         private const val VERIFIED_FACE = 1 shl 1
