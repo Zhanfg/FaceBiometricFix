@@ -118,7 +118,7 @@ internal class PromptCollisionGuard(
         badge.gravity = Gravity.CENTER
         badge.typeface = Typeface.DEFAULT_BOLD
         badge.setTextSize(TypedValue.COMPLEX_UNIT_PX, height * 0.58f)
-        badge.contentDescription = "指纹已验证"
+        badge.contentDescription = "已经过身份验证"
         badge.isClickable = false
         badge.isFocusable = false
         badge.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
