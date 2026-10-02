@@ -305,7 +305,8 @@ internal class DualBiometricCoordinator(
                 opPackageName = findField(type, "mOpPackageName"),
                 preAuthInfo = findField(type, "mPreAuthInfo"),
                 sensorIdToModality = findMethod(type, "sensorIdToModality") {
-                    it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+                    it.parameterTypes.size == 1 &&
+                        it.parameterTypes[0] == Int::class.javaPrimitiveType
                 },
                 onStartFingerprint = findMethod(type, "onStartFingerprint") {
                     it.parameterTypes.isEmpty()
@@ -401,10 +402,11 @@ internal class DualBiometricCoordinator(
     private fun findField(type: Class<*>, name: String): Field? {
         var current: Class<*>? = type
         while (current != null) {
+            val cls = current
             runCatching {
-                current.getDeclaredField(name).apply { isAccessible = true }
+                cls.getDeclaredField(name).apply { isAccessible = true }
             }.getOrNull()?.let { return it }
-            current = current.superclass
+            current = cls.superclass
         }
         return null
     }
@@ -416,13 +418,14 @@ internal class DualBiometricCoordinator(
     ): Method? {
         var current: Class<*>? = type
         while (current != null) {
-            current.declaredMethods.firstOrNull {
+            val cls = current
+            cls.declaredMethods.firstOrNull {
                 it.name == name && predicate(it)
             }?.let {
                 it.isAccessible = true
                 return it
             }
-            current = current.superclass
+            current = cls.superclass
         }
         return null
     }
