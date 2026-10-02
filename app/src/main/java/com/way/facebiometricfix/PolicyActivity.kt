@@ -92,7 +92,7 @@ class PolicyActivity : Activity() {
             setTextColor(secondaryText)
             textSize = 12f
             setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = rounded(
+            this.background = rounded(
                 if (darkMode) Color.rgb(38, 39, 44) else Color.rgb(235, 238, 244),
                 12f,
             )
@@ -129,7 +129,7 @@ class PolicyActivity : Activity() {
             setTextColor(primaryText)
             setHintTextColor(secondaryText)
             setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = rounded(
+            this.background = rounded(
                 if (darkMode) Color.rgb(31, 32, 36) else Color.WHITE,
                 14f,
                 strokeColor = if (darkMode) Color.rgb(64, 65, 72) else Color.rgb(218, 221, 228),
