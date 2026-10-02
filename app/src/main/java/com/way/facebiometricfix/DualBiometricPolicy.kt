@@ -13,6 +13,8 @@ enum class BiometricPolicyMode {
 internal object PolicyConfig {
     const val PREF_GROUP = "biometric_policy"
     const val KEY_PREFIX = "policy."
+    const val KEY_DEFAULT_MODE = "default_mode"
+    const val KEY_MANAGED_PACKAGES = "managed_packages"
 
     fun keyFor(packageName: String): String = KEY_PREFIX + packageName
 
@@ -24,9 +26,9 @@ internal object PolicyConfig {
 /**
  * Hot-path policy cache backed by libxposed Remote Preferences.
  *
- * The hooked system_server side is read-only. The settings app writes the same
- * remote preference group through XposedService. A listener keeps this cache
- * current without rebooting or rescanning on every authentication.
+ * Explicit per-app overrides win first. The global default applies only to
+ * packages discovered by the manager scan, so unrelated/system packages keep
+ * Android's native behavior unless the user explicitly configures them.
  */
 internal object DualBiometricPolicy {
     private val excludedPackages = setOf(
@@ -39,18 +41,40 @@ internal object DualBiometricPolicy {
     private val modes = ConcurrentHashMap<String, BiometricPolicyMode>()
 
     @Volatile
+    private var defaultMode = BiometricPolicyMode.ANY
+
+    @Volatile
+    private var managedPackages: Set<String> = emptySet()
+
+    @Volatile
     private var remotePrefs: SharedPreferences? = null
 
     private val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
-        if (key == null || !key.startsWith(PolicyConfig.KEY_PREFIX)) return@OnSharedPreferenceChangeListener
-        val packageName = key.removePrefix(PolicyConfig.KEY_PREFIX)
-        if (packageName.isBlank()) return@OnSharedPreferenceChangeListener
+        when {
+            key == PolicyConfig.KEY_DEFAULT_MODE -> {
+                defaultMode = PolicyConfig.parse(
+                    prefs.getString(PolicyConfig.KEY_DEFAULT_MODE, null)
+                )
+            }
 
-        val mode = PolicyConfig.parse(prefs.getString(key, null))
-        if (mode == BiometricPolicyMode.ANY) {
-            modes.remove(packageName)
-        } else {
-            modes[packageName] = mode
+            key == PolicyConfig.KEY_MANAGED_PACKAGES -> {
+                managedPackages = prefs.getStringSet(
+                    PolicyConfig.KEY_MANAGED_PACKAGES,
+                    emptySet(),
+                )?.toSet().orEmpty()
+            }
+
+            key != null && key.startsWith(PolicyConfig.KEY_PREFIX) -> {
+                val packageName = key.removePrefix(PolicyConfig.KEY_PREFIX)
+                if (packageName.isBlank()) return@OnSharedPreferenceChangeListener
+
+                val mode = PolicyConfig.parse(prefs.getString(key, null))
+                if (mode == BiometricPolicyMode.ANY) {
+                    modes.remove(packageName)
+                } else {
+                    modes[packageName] = mode
+                }
+            }
         }
     }
 
@@ -59,6 +83,14 @@ internal object DualBiometricPolicy {
 
         remotePrefs?.unregisterOnSharedPreferenceChangeListener(listener)
         remotePrefs = prefs
+
+        defaultMode = PolicyConfig.parse(
+            prefs.getString(PolicyConfig.KEY_DEFAULT_MODE, null)
+        )
+        managedPackages = prefs.getStringSet(
+            PolicyConfig.KEY_MANAGED_PACKAGES,
+            emptySet(),
+        )?.toSet().orEmpty()
 
         modes.clear()
         prefs.all.forEach { (key, value) ->
@@ -77,7 +109,9 @@ internal object DualBiometricPolicy {
         if (packageName.isBlank() || packageName in excludedPackages) {
             return BiometricPolicyMode.ANY
         }
-        return modes[packageName] ?: BiometricPolicyMode.ANY
+
+        modes[packageName]?.let { return it }
+        return if (packageName in managedPackages) defaultMode else BiometricPolicyMode.ANY
     }
 
     fun shouldPromoteFace(packageName: String): Boolean =
