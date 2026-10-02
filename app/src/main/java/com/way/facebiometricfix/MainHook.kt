@@ -57,6 +57,7 @@ class MainHook : XposedModule() {
         if (
             packageName != null &&
             packageName != CODEBOOK_PACKAGE &&
+            DualBiometricPolicy.shouldPromoteFace(packageName) &&
             sensorStrength == OEM_STRENGTH_MASK &&
             (requestedStrength == STRONG_AUTHENTICATORS ||
                 requestedStrength == WEAK_AUTHENTICATORS)
@@ -144,14 +145,13 @@ class MainHook : XposedModule() {
         dualAuth.prepare(session)
 
         val args = chain.args.toTypedArray()
+        val override = dualAuth.fingerprintStartOverride(session)
         val result = if (
             args.size == 1 &&
             args[0] is Boolean &&
-            dualAuth.shouldForceFingerprintStart(session)
+            override != null
         ) {
-            // FACE is already active. Start UDFPS as soon as the prompt is ready
-            // so either modality can become the first factor.
-            args[0] = true
+            args[0] = override
             chain.proceed(args)
         } else {
             chain.proceed()
@@ -160,6 +160,14 @@ class MainHook : XposedModule() {
         dualAuth.onDialogAnimatedIn(session)
         result
     }
+    private val authSessionFingerprintStartHooker = XposedInterface.Hooker { chain ->
+        if (dualAuth.shouldBlockFingerprintStart(chain.thisObject)) {
+            null
+        } else {
+            chain.proceed()
+        }
+    }
+
     private val authSessionCleanupHooker = XposedInterface.Hooker { chain ->
         try {
             chain.proceed()
@@ -208,6 +216,13 @@ class MainHook : XposedModule() {
 
     override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
         logInfo("hooking biometrics in system_server ...")
+        runCatching {
+            DualBiometricPolicy.attach(getRemotePreferences(PolicyConfig.PREF_GROUP))
+        }.onSuccess {
+            logInfo("OK: live per-app biometric policy attached")
+        }.onFailure {
+            logError("FAIL remote policy; falling back to ANY", it)
+        }
         installSystemServerHooks(param.classLoader)
     }
 
@@ -379,6 +394,16 @@ class MainHook : XposedModule() {
                 }
 
             authSessionClass.declaredMethods
+                .filter { it.name == "onStartFingerprint" && it.parameterTypes.isEmpty() }
+                .forEachIndexed { index, method ->
+                    method.isAccessible = true
+                    hook(method)
+                        .setId("${HOOK_ID_AUTH_SESSION_FP_START}_${index}")
+                        .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                        .intercept(authSessionFingerprintStartHooker)
+                }
+
+            authSessionClass.declaredMethods
                 .filter {
                     it.name == "onDialogDismissed" ||
                         it.name == "onCancelAuthSession" ||
@@ -474,6 +499,7 @@ class MainHook : XposedModule() {
         private const val HOOK_ID_AUTH_SESSION_REJECTED = "hook_authsession_rejected"
         private const val HOOK_ID_AUTH_SESSION_TIMEOUT = "hook_authsession_timeout"
         private const val HOOK_ID_AUTH_SESSION_DIALOG = "hook_authsession_dialog"
+        private const val HOOK_ID_AUTH_SESSION_FP_START = "hook_authsession_fp_start"
         private const val HOOK_ID_AUTH_SESSION_CLEANUP = "hook_authsession_cleanup"
 
         private const val OEM_STRENGTH_MASK = 4095
