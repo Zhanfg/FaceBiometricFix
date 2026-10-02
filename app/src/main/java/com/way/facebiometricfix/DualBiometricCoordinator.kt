@@ -432,14 +432,14 @@ internal class DualBiometricCoordinator(
                 session,
                 state,
                 UI_STATE_FINGERPRINT_VERIFIED,
-                "指纹已验证，请面向屏幕完成人脸识别；正在重新扫描人脸",
+                "正在查找您的面孔",
             )
         } else {
             sendUiState(
                 session,
                 state,
                 UI_STATE_WAIT_BOTH,
-                "请完成人脸和指纹验证，顺序不限；正在重新扫描人脸",
+                "",
             )
         }
 
@@ -494,19 +494,19 @@ internal class DualBiometricCoordinator(
             when (state.phase) {
                 Phase.WAIT_BOTH -> Pair(
                     UI_STATE_WAIT_BOTH,
-                    "请完成人脸和指纹验证，顺序不限",
+                    "",
                 )
                 Phase.WAIT_FACE -> Pair(
                     UI_STATE_FINGERPRINT_VERIFIED,
-                    "指纹已验证，请完成人脸识别",
+                    "正在查找您的面孔",
                 )
                 Phase.WAIT_FINGERPRINT -> Pair(
                     UI_STATE_FACE_VERIFIED,
-                    "人脸已验证，请验证指纹",
+                    "请触摸指纹传感器",
                 )
                 Phase.COMPLETE -> Pair(
                     UI_STATE_COMPLETE,
-                    "双重认证完成",
+                    "",
                 )
                 Phase.ABORTING, Phase.TERMINATED -> return
             }
