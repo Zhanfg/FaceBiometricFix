@@ -14,14 +14,17 @@ import io.github.libxposed.api.XposedModuleInterface
 class MainHook : XposedModule() {
 
     private fun logInfo(msg: String) {
+        Log.i(TAG, msg)
         log(Log.INFO, TAG, msg)
     }
 
     private fun logWarn(msg: String) {
+        Log.w(TAG, msg)
         log(Log.WARN, TAG, msg)
     }
 
     private fun logError(msg: String, tr: Throwable) {
+        Log.e(TAG, msg, tr)
         log(Log.ERROR, TAG, msg, tr)
     }
 
