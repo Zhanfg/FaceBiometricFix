@@ -3,7 +3,7 @@ package com.way.facebiometricfix
 import android.content.SharedPreferences
 import java.util.concurrent.ConcurrentHashMap
 
-internal enum class BiometricPolicyMode {
+enum class BiometricPolicyMode {
     ANY,
     FACE_ONLY,
     FINGERPRINT_ONLY,
