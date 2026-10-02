@@ -41,6 +41,10 @@ android {
             }
         }
     }
+    buildFeatures {
+        compose = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -50,4 +54,9 @@ android {
 dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:101.0.0")
+
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.compose.ui:ui:1.12.1")
+    implementation("androidx.compose.foundation:foundation:1.12.1")
+    implementation("androidx.compose.material3:material3:1.4.0")
 }
