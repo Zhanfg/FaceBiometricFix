@@ -1,6 +1,10 @@
 package com.way.facebiometricfix
 
+import android.graphics.Typeface
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import java.lang.ref.WeakReference
@@ -24,6 +28,7 @@ internal class PromptCollisionGuard(
     )
 
     private val guards = WeakHashMap<View, Guard>()
+    private val verifiedBadges = WeakHashMap<View, TextView>()
 
     fun onFaceAuthenticated(authController: Any?) {
         if (authController == null) return
@@ -39,9 +44,37 @@ internal class PromptCollisionGuard(
         install(root)
     }
 
+    fun showDualAuthState(authController: Any?, state: String, message: String) {
+        if (authController == null) return
+        val root = findCurrentDialogView(authController) ?: return
+        updateIndicator(root, message)
+
+        when (state) {
+            DualBiometricCoordinator.UI_STATE_FINGERPRINT_VERIFIED -> {
+                // Fingerprint is already the completed first factor: stop the
+                // UDFPS affordance and replace its prompt icon with a check mark.
+                runCatching { hideUdfpsOverlay(authController) }
+                    .onFailure { logError("FAIL: hide UDFPS after fingerprint factor", it) }
+                showVerifiedBadge(root)
+            }
+
+            DualBiometricCoordinator.UI_STATE_WAIT_BOTH,
+            DualBiometricCoordinator.UI_STATE_FACE_VERIFIED,
+            -> clearVerifiedBadge(root)
+
+            DualBiometricCoordinator.UI_STATE_COMPLETE -> {
+                // Keep a previously shown check until the dialog dismisses.
+            }
+        }
+    }
     fun showNeutralGuidance(authController: Any?, message: String) {
         if (authController == null || message.isBlank()) return
         val root = findCurrentDialogView(authController) ?: return
+        updateIndicator(root, message)
+    }
+
+    private fun updateIndicator(root: View, message: String) {
+        if (message.isBlank()) return
         val indicatorId = resourceId(root, "indicator")
         if (indicatorId == 0) return
         val indicator = root.findViewById<TextView>(indicatorId) ?: return
@@ -52,6 +85,71 @@ internal class PromptCollisionGuard(
             indicator.contentDescription = message
             indicator.visibility = View.VISIBLE
         }
+    }
+
+    private fun showVerifiedBadge(root: View) {
+        val host = root as? ViewGroup ?: return
+        val iconId = resourceId(root, "biometric_icon")
+        val overlayId = resourceId(root, "biometric_icon_overlay")
+        val icon = if (iconId != 0) root.findViewById<View>(iconId) else null
+        val iconOverlay = if (overlayId != 0) root.findViewById<View>(overlayId) else null
+        val target = icon ?: iconOverlay ?: return
+
+        icon?.let(::suppressVisualOnly)
+        iconOverlay?.let(::suppressVisualOnly)
+
+        val badge = synchronized(verifiedBadges) {
+            verifiedBadges[root] ?: TextView(root.context).also {
+                verifiedBadges[root] = it
+            }
+        }
+
+        val targetLocation = IntArray(2)
+        val rootLocation = IntArray(2)
+        target.getLocationInWindow(targetLocation)
+        root.getLocationInWindow(rootLocation)
+
+        val width = target.width.coerceAtLeast(1)
+        val height = target.height.coerceAtLeast(1)
+        val left = targetLocation[0] - rootLocation[0]
+        val top = targetLocation[1] - rootLocation[1]
+
+        badge.text = "✓"
+        badge.gravity = Gravity.CENTER
+        badge.typeface = Typeface.DEFAULT_BOLD
+        badge.setTextSize(TypedValue.COMPLEX_UNIT_PX, height * 0.58f)
+        badge.contentDescription = "指纹已验证"
+        badge.isClickable = false
+        badge.isFocusable = false
+        badge.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+
+        val accent = TypedValue()
+        if (root.context.theme.resolveAttribute(android.R.attr.colorAccent, accent, true)) {
+            badge.setTextColor(accent.data)
+        } else {
+            val indicatorId = resourceId(root, "indicator")
+            val indicator = if (indicatorId != 0) root.findViewById<TextView>(indicatorId) else null
+            indicator?.let { badge.setTextColor(it.currentTextColor) }
+        }
+
+        if (!badge.isAttachedToWindow) {
+            host.overlay.add(badge)
+        }
+        badge.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
+        )
+        badge.layout(left, top, left + width, top + height)
+        badge.visibility = View.VISIBLE
+        logInfo("OK: fingerprint first-factor check mark shown")
+    }
+
+    private fun clearVerifiedBadge(root: View) {
+        val host = root as? ViewGroup ?: return
+        val badge = synchronized(verifiedBadges) {
+            verifiedBadges.remove(root)
+        } ?: return
+        runCatching { host.overlay.remove(badge) }
     }
     private fun install(root: View) {
         synchronized(guards) {
