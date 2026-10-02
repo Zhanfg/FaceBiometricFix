@@ -282,7 +282,6 @@ internal class DualBiometricCoordinator(
     private fun startFingerprintStage(session: Any, state: SessionState) {
         synchronized(state) {
             if (state.fingerprintStartRequested) return
-            state.fingerprintStartRequested = true
         }
 
         val handles = handlesFor(session)
@@ -310,17 +309,22 @@ internal class DualBiometricCoordinator(
             logError("DualAuth: failed to start fingerprint stage", it)
         }.getOrDefault(false)
 
-        if (!started) {
-            logWarn("DualAuth: no compatible fingerprint-start method; session remains fail-closed")
-            notifyStage(
-                session,
-                TYPE_FINGERPRINT,
-                localized(
-                    zh = "指纹阶段无法启动，请取消后重试",
-                    en = "Fingerprint stage unavailable. Cancel and retry.",
-                ),
-            )
+        if (started) {
+            synchronized(state) {
+                state.fingerprintStartRequested = true
+            }
+            return
         }
+
+        logWarn("DualAuth: no compatible fingerprint-start method; session remains fail-closed")
+        notifyStage(
+            session,
+            TYPE_FINGERPRINT,
+            localized(
+                zh = "指纹阶段无法启动，请取消后重试",
+                en = "Fingerprint stage unavailable. Cancel and retry.",
+            ),
+        )
     }
 
     private fun notifyFingerprintStage(session: Any, state: SessionState) {
