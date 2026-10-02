@@ -256,7 +256,8 @@ class MainHook : XposedModule() {
             authSessionClass.declaredMethods
                 .filter {
                     (it.name == "onStartFingerprint" ||
-                        it.name == "startFingerprintSensorsNow") &&
+                        it.name == "startFingerprintSensorsNow" ||
+                        it.name == "startAllPreparedFingerprintSensors") &&
                         it.parameterTypes.isEmpty()
                 }
                 .forEach { method ->
