@@ -400,29 +400,150 @@ internal class DualBiometricCoordinator(
         return null
     }
 
-    private fun stopFaceStage(session: Any, state: SessionState, sensorId: Int) {
-        val shouldStop = synchronized(state) {
-            if (state.faceStopRequested) {
+    private fun requestFaceRestart(
+        session: Any,
+        state: SessionState,
+        sensorId: Int,
+        reason: String,
+    ) {
+        val shouldRestart = synchronized(state) {
+            if (
+                state.phase == Phase.COMPLETE ||
+                state.phase == Phase.ABORTING ||
+                state.phase == Phase.TERMINATED ||
+                state.faceRestartPending
+            ) {
                 false
             } else {
-                state.faceStopRequested = true
+                state.faceRestartPending = true
                 true
             }
         }
-        if (!shouldStop) return
+        if (!shouldRestart) return
 
-        val method = handlesFor(session).pauseSensorIfSupported ?: run {
-            logWarn("DualAuth: FACE stop helper unavailable; continuing bounded stage")
-            return
+        sendNeutralGuidance(
+            session,
+            state,
+            if (state.verifiedMask and VERIFIED_FINGERPRINT != 0) {
+                "指纹已验证，请面向屏幕完成人脸识别"
+            } else {
+                "请完成人脸和指纹验证，顺序不限；正在重新扫描人脸"
+            },
+        )
+
+        val pause = handlesFor(session).pauseSensorIfSupported
+        val requested = runCatching {
+            (pause?.invoke(session, sensorId) as? Boolean) == true
+        }.onFailure {
+            logError("DualAuth: failed to restart FACE after $reason", it)
+        }.getOrDefault(false)
+
+        if (!requested) {
+            synchronized(state) { state.faceRestartPending = false }
+            postFaceRetry(session, state)
         }
+
+        logInfo("DualAuth: FACE re-arm requested for ${state.packageName}; reason=$reason")
+    }
+
+    private fun postFaceRetry(session: Any, state: SessionState) {
+        val sessionRef = WeakReference(session)
+        val stateRef = WeakReference(state)
+        handler.post {
+            val liveSession = sessionRef.get() ?: return@post
+            val liveState = stateRef.get() ?: return@post
+            if (findState(liveSession) !== liveState) return@post
+
+            val allowed = synchronized(liveState) {
+                liveState.phase == Phase.WAIT_BOTH || liveState.phase == Phase.WAIT_FACE
+            }
+            if (!allowed) return@post
+
+            val retry = handlesFor(liveSession).onTryAgainPressed
+            if (retry == null) {
+                postAbort(liveSession, liveState, "face_retry_method_missing")
+                return@post
+            }
+
+            runCatching { retry.invoke(liveSession) }
+                .onSuccess {
+                    logInfo("DualAuth: FACE sensor re-armed for ${liveState.packageName}")
+                }
+                .onFailure {
+                    logError("DualAuth: FACE re-arm failed", it)
+                    postAbort(liveSession, liveState, "face_retry_failed")
+                }
+        }
+    }
+
+    private fun sendGuidanceForCurrentState(session: Any, state: SessionState) {
+        val message = synchronized(state) {
+            if (!state.uiReady) return
+            when (state.phase) {
+                Phase.WAIT_BOTH -> "请完成人脸和指纹验证，顺序不限"
+                Phase.WAIT_FACE -> "指纹已验证，请完成人脸识别"
+                Phase.WAIT_FINGERPRINT -> "人脸已验证，请验证指纹"
+                Phase.COMPLETE -> "双重认证完成"
+                Phase.ABORTING, Phase.TERMINATED -> return
+            }
+        }
+        sendNeutralGuidance(session, state, message)
+    }
+
+    private fun sendNeutralGuidance(
+        session: Any,
+        state: SessionState,
+        message: String,
+    ) {
+        synchronized(state) {
+            if (!state.uiReady || state.lastGuidance == message) return
+            state.lastGuidance = message
+        }
+
+        val handles = handlesFor(session)
+        val statusBar = runCatching { handles.statusBarService?.get(session) }
+            .getOrNull() ?: return
+        val method = statusBarHelpMethod(statusBar.javaClass) ?: return
 
         runCatching {
-            method.invoke(session, sensorId)
-        }.onSuccess {
-            logInfo("DualAuth: requested FACE sensor stop after stage-1 success")
+            method.invoke(statusBar, TYPE_FACE, NEUTRAL_GUIDANCE_PREFIX + message)
         }.onFailure {
-            logError("DualAuth: failed to stop FACE sensor; continuing bounded stage", it)
+            logError("DualAuth: failed to send neutral guidance", it)
         }
+    }
+
+    private fun scheduleSecondFactorDeadlineLocked(session: Any, state: SessionState) {
+        cancelDeadlineLocked(state)
+        if (state.phase != Phase.WAIT_FACE && state.phase != Phase.WAIT_FINGERPRINT) return
+
+        state.deadlineAtElapsedMs = SystemClock.elapsedRealtime() + SECOND_FACTOR_TIMEOUT_MS
+        val sessionRef = WeakReference(session)
+        val stateRef = WeakReference(state)
+        val deadline = state.deadlineAtElapsedMs
+
+        val runnable = Runnable {
+            val liveSession = sessionRef.get() ?: return@Runnable
+            val liveState = stateRef.get() ?: return@Runnable
+            val expired = synchronized(liveState) {
+                (liveState.phase == Phase.WAIT_FACE ||
+                    liveState.phase == Phase.WAIT_FINGERPRINT) &&
+                    liveState.deadlineAtElapsedMs == deadline &&
+                    SystemClock.elapsedRealtime() >= deadline
+            }
+            if (expired) {
+                postAbort(liveSession, liveState, "second_factor_deadline")
+            }
+        }
+
+        state.deadlineRunnable = runnable
+        handler.postDelayed(runnable, SECOND_FACTOR_TIMEOUT_MS)
+    }
+
+    private fun markSuccessfulSensorStopped(session: Any, sensorId: Int) {
+        val sensor = findSensor(session, sensorId) ?: return
+        val cookieMethod = sensorCookieMethod(sensor.javaClass) ?: return
+        val cookie = runCatching { cookieMethod.invoke(sensor) as? Int }.getOrNull() ?: return
+        markSensorStopped(session, sensorId, cookie, BIOMETRIC_SUCCESS)
     }
 
     private fun markSensorStopped(
@@ -433,86 +554,9 @@ internal class DualBiometricCoordinator(
     ) {
         val sensor = findSensor(session, sensorId) ?: return
         val method = sensorStopMethod(sensor.javaClass) ?: return
-        runCatching {
-            method.invoke(sensor, cookie, error)
-        }.onFailure {
-            logError("DualAuth: failed to mark consumed FACE error as stopped", it)
-        }
+        runCatching { method.invoke(sensor, cookie, error) }
+            .onFailure { logError("DualAuth: failed to update sensor stop state", it) }
     }
-
-    private fun advanceFingerprintStage(session: Any, state: SessionState) {
-        val ready = synchronized(state) {
-            state.phase == Phase.WAIT_FINGERPRINT &&
-                state.uiReady &&
-                !state.fingerprintStartRequested
-        }
-        if (!ready) return
-
-        startFingerprintStage(session, state)
-    }
-
-    private fun startFingerprintStage(session: Any, state: SessionState) {
-        val method = handlesFor(session).let { handles ->
-            handles.onStartFingerprint
-                ?: handles.startFingerprintSensorsNow
-                ?: handles.startAllPreparedFingerprintSensors
-        }
-
-        if (method == null) {
-            postAbort(session, state, "fingerprint_start_method_missing")
-            return
-        }
-
-        val started = runCatching {
-            method.invoke(session)
-            true
-        }.onFailure {
-            logError("DualAuth: fingerprint stage start threw", it)
-        }.getOrDefault(false)
-
-        if (!started) {
-            postAbort(session, state, "fingerprint_start_failed")
-            return
-        }
-
-        synchronized(state) {
-            if (state.phase == Phase.WAIT_FINGERPRINT) {
-                state.fingerprintStartRequested = true
-            }
-        }
-        logInfo("DualAuth: fingerprint stage started for ${state.packageName}")
-    }
-
-    private fun scheduleStageDeadline(session: Any, state: SessionState) {
-        synchronized(state) {
-            cancelDeadlineLocked(state)
-            if (state.phase != Phase.WAIT_FINGERPRINT) return
-
-            state.deadlineAtElapsedMs = SystemClock.elapsedRealtime() + FINGERPRINT_STAGE_TIMEOUT_MS
-            val sessionRef = WeakReference(session)
-            val stateRef = WeakReference(state)
-            val deadline = state.deadlineAtElapsedMs
-
-            val runnable = Runnable {
-                val liveSession = sessionRef.get() ?: return@Runnable
-                val liveState = stateRef.get() ?: return@Runnable
-
-                val expired = synchronized(liveState) {
-                    liveState.phase == Phase.WAIT_FINGERPRINT &&
-                        liveState.deadlineAtElapsedMs == deadline &&
-                        SystemClock.elapsedRealtime() >= deadline
-                }
-
-                if (expired) {
-                    postAbort(liveSession, liveState, "fingerprint_stage_deadline")
-                }
-            }
-
-            state.deadlineRunnable = runnable
-            handler.postDelayed(runnable, FINGERPRINT_STAGE_TIMEOUT_MS)
-        }
-    }
-
     private fun postAbort(session: Any, state: SessionState, reason: String) {
         val shouldPost = synchronized(state) {
             if (
