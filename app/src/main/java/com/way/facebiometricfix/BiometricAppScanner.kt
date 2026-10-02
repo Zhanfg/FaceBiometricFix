@@ -17,6 +17,13 @@ object BiometricAppScanner {
     private const val USE_BIOMETRIC = "android.permission.USE_BIOMETRIC"
     private const val USE_FINGERPRINT = "android.permission.USE_FINGERPRINT"
 
+    private val excludedPackages = setOf(
+        "android",
+        "com.android.systemui",
+        "com.coloros.codebook",
+        "com.way.facebiometricfix",
+    )
+
     fun scan(context: Context): List<BiometricCandidateApp> {
         val pm = context.packageManager
         val packages = pm.getInstalledPackages(
@@ -24,7 +31,7 @@ object BiometricAppScanner {
         )
 
         return packages.asSequence()
-            .filter { it.packageName != context.packageName }
+            .filter { it.packageName !in excludedPackages && it.packageName != context.packageName }
             .mapNotNull { info ->
                 val requested = info.requestedPermissions?.toSet().orEmpty()
                 val evidence = buildSet {
