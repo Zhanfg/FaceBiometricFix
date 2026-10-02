@@ -46,6 +46,8 @@ internal class DualBiometricCoordinator(
         val sensorIdToModality: Method?,
         val onStartFingerprint: Method?,
         val startFingerprintSensorsNow: Method?,
+        val pauseSensorIfSupported: Method?,
+        val cancelAllSensorsFiltered: Method?,
         val statusBarService: Field?,
     )
 
@@ -100,7 +102,7 @@ internal class DualBiometricCoordinator(
         val modality = sensorModality(session, sensorId)
 
         return when (modality) {
-            TYPE_FACE -> onFaceSucceeded(session, state)
+            TYPE_FACE -> onFaceSucceeded(session, state, sensorId)
             TYPE_FINGERPRINT -> onFingerprintSucceeded(state)
             else -> SuccessDecision.PROCEED
         }
@@ -113,7 +115,11 @@ internal class DualBiometricCoordinator(
         }
     }
 
-    private fun onFaceSucceeded(session: Any, state: SessionState): SuccessDecision {
+    private fun onFaceSucceeded(
+        session: Any,
+        state: SessionState,
+        sensorId: Int,
+    ): SuccessDecision {
         synchronized(state) {
             when (state.phase) {
                 Phase.WAIT_FACE -> {
@@ -125,6 +131,11 @@ internal class DualBiometricCoordinator(
                 Phase.COMPLETE -> return SuccessDecision.CONSUME
             }
         }
+
+        // Stop the face client immediately after stage 1 succeeds. Besides
+        // avoiding duplicate callbacks, this turns off the camera/face stack
+        // before UDFPS begins and is the main power win of sequential mode.
+        pauseFaceStage(session, sensorId)
 
         notifyFingerprintStage(session, state)
         startFingerprintStage(session, state)
@@ -225,6 +236,40 @@ internal class DualBiometricCoordinator(
         return runCatching { field.getInt(sensor) }.getOrDefault(0)
     }
 
+    private fun pauseFaceStage(session: Any, sensorId: Int) {
+        val handles = handlesFor(session)
+
+        val paused = handles.pauseSensorIfSupported?.let { method ->
+            runCatching {
+                method.invoke(session, sensorId) as? Boolean
+            }.onFailure {
+                logError("DualAuth: pauseSensorIfSupported failed", it)
+            }.getOrNull()
+        } == true
+
+        if (paused) {
+            logInfo("DualAuth: FACE sensor paused after stage-1 success")
+            return
+        }
+
+        val cancelFiltered = handles.cancelAllSensorsFiltered ?: run {
+            logWarn("DualAuth: FACE cancel helper unavailable; duplicate callbacks will be ignored")
+            return
+        }
+
+        runCatching {
+            val predicate = java.util.function.Function<Any, Boolean> { sensor ->
+                val id = sensorIdField(sensor.javaClass)
+                    ?.let { field -> runCatching { field.getInt(sensor) }.getOrNull() }
+                id == sensorId
+            }
+            cancelFiltered.invoke(session, predicate)
+            logInfo("DualAuth: FACE sensor cancelled through filtered fallback")
+        }.onFailure {
+            logError("DualAuth: filtered FACE cancellation failed", it)
+        }
+    }
+
     private fun startFingerprintStage(session: Any, state: SessionState) {
         synchronized(state) {
             if (state.fingerprintStartRequested) return
@@ -313,6 +358,14 @@ internal class DualBiometricCoordinator(
                 },
                 startFingerprintSensorsNow = findMethod(type, "startFingerprintSensorsNow") {
                     it.parameterTypes.isEmpty()
+                },
+                pauseSensorIfSupported = findMethod(type, "pauseSensorIfSupported") {
+                    it.parameterTypes.size == 1 &&
+                        it.parameterTypes[0] == Int::class.javaPrimitiveType
+                },
+                cancelAllSensorsFiltered = findMethod(type, "cancelAllSensors") {
+                    it.parameterTypes.size == 1 &&
+                        it.parameterTypes[0].name == "java.util.function.Function"
                 },
                 statusBarService = findField(type, "mStatusBarService"),
             )
