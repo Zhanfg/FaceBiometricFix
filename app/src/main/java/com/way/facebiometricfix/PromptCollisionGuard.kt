@@ -2,6 +2,7 @@ package com.way.facebiometricfix
 
 import android.view.View
 import android.view.ViewTreeObserver
+import android.widget.TextView
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
@@ -38,6 +39,20 @@ internal class PromptCollisionGuard(
         install(root)
     }
 
+    fun showNeutralGuidance(authController: Any?, message: String) {
+        if (authController == null || message.isBlank()) return
+        val root = findCurrentDialogView(authController) ?: return
+        val indicatorId = resourceId(root, "indicator")
+        if (indicatorId == 0) return
+        val indicator = root.findViewById<TextView>(indicatorId) ?: return
+
+        indicator.post {
+            if (!indicator.isAttachedToWindow) return@post
+            indicator.text = message
+            indicator.contentDescription = message
+            indicator.visibility = View.VISIBLE
+        }
+    }
     private fun install(root: View) {
         synchronized(guards) {
             if (guards.containsKey(root)) return
