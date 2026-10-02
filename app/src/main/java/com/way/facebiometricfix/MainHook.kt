@@ -170,14 +170,28 @@ class MainHook : XposedModule() {
 
     private val systemUiNeutralHelpHooker = XposedInterface.Hooker { chain ->
         val message = runCatching { chain.getArg(1) as? String }.getOrNull()
-        if (message != null && message.startsWith(DualBiometricCoordinator.NEUTRAL_GUIDANCE_PREFIX)) {
-            promptCollisionGuard.showNeutralGuidance(
-                chain.thisObject,
-                message.removePrefix(DualBiometricCoordinator.NEUTRAL_GUIDANCE_PREFIX),
-            )
-            null
-        } else {
-            chain.proceed()
+
+        when {
+            message != null &&
+                message.startsWith(DualBiometricCoordinator.UI_STATE_PREFIX) -> {
+                val payload = message.removePrefix(DualBiometricCoordinator.UI_STATE_PREFIX)
+                val separator = payload.indexOf('|')
+                val state = if (separator >= 0) payload.substring(0, separator) else payload
+                val text = if (separator >= 0) payload.substring(separator + 1) else ""
+                promptCollisionGuard.showDualAuthState(chain.thisObject, state, text)
+                null
+            }
+
+            message != null &&
+                message.startsWith(DualBiometricCoordinator.NEUTRAL_GUIDANCE_PREFIX) -> {
+                promptCollisionGuard.showNeutralGuidance(
+                    chain.thisObject,
+                    message.removePrefix(DualBiometricCoordinator.NEUTRAL_GUIDANCE_PREFIX),
+                )
+                null
+            }
+
+            else -> chain.proceed()
         }
     }
     private val systemUiAuthSuccessHooker = XposedInterface.Hooker { chain ->
