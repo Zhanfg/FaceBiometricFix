@@ -13,8 +13,9 @@ class PolicyStore(
     )
 
     fun explicitModeFor(packageName: String): BiometricPolicyMode? {
-        val raw = local.getString(PolicyConfig.keyFor(packageName), null) ?: return null
-        return PolicyConfig.parse(raw).takeUnless { it == BiometricPolicyMode.ANY }
+        val key = PolicyConfig.keyFor(packageName)
+        if (!local.contains(key)) return null
+        return PolicyConfig.parse(local.getString(key, null))
     }
 
     fun defaultMode(): BiometricPolicyMode =
@@ -45,7 +46,7 @@ class PolicyStore(
         local.edit().apply {
             packageNames.forEach { packageName ->
                 val key = PolicyConfig.keyFor(packageName)
-                if (mode == null || mode == BiometricPolicyMode.ANY) {
+                if (mode == null) {
                     remove(key)
                 } else {
                     putString(key, mode.name)
@@ -57,7 +58,7 @@ class PolicyStore(
             remoteProvider()?.edit()?.apply {
                 packageNames.forEach { packageName ->
                     val key = PolicyConfig.keyFor(packageName)
-                    if (mode == null || mode == BiometricPolicyMode.ANY) {
+                    if (mode == null) {
                         remove(key)
                     } else {
                         putString(key, mode.name)
