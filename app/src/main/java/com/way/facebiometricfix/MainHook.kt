@@ -78,17 +78,26 @@ class MainHook : XposedModule() {
     private val authSessionSuccessHooker = XposedInterface.Hooker { chain ->
         val session = chain.thisObject
         val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
+        val strong = runCatching { chain.getArg(1) as? Boolean }.getOrNull()
+        val token = runCatching { chain.getArg(2) as? ByteArray }.getOrNull()
 
-        if (sensorId == null) {
+        if (sensorId == null || strong == null) {
             return@Hooker chain.proceed()
         }
 
-        when (dualAuth.onAuthenticationSucceeded(session, sensorId)) {
-            DualBiometricCoordinator.SuccessDecision.PROCEED -> chain.proceed()
+        val action = dualAuth.onAuthenticationSucceeded(session, sensorId, strong, token)
+        when (action.decision) {
+            DualBiometricCoordinator.SuccessDecision.PROCEED_CURRENT -> chain.proceed()
+            DualBiometricCoordinator.SuccessDecision.PROCEED_STORED_FINGERPRINT -> {
+                val args = chain.args.toTypedArray()
+                args[0] = action.sensorId
+                args[1] = action.strong
+                args[2] = action.token
+                chain.proceed(args)
+            }
             DualBiometricCoordinator.SuccessDecision.CONSUME -> null
         }
     }
-
     private val authSessionErrorHooker = XposedInterface.Hooker { chain ->
         val session = chain.thisObject
         val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
@@ -116,34 +125,20 @@ class MainHook : XposedModule() {
 
     private val authSessionRejectedHooker = XposedInterface.Hooker { chain ->
         val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
-        if (
-            sensorId != null &&
-            dualAuth.shouldConsumeRejected(chain.thisObject, sensorId)
-        ) {
+        if (sensorId != null && dualAuth.onAuthenticationRejected(chain.thisObject, sensorId)) {
             null
         } else {
             chain.proceed()
         }
     }
-
     private val authSessionTimedOutHooker = XposedInterface.Hooker { chain ->
-        val session = chain.thisObject
         val sensorId = runCatching { chain.getArg(0) as? Int }.getOrNull()
-
-        if (
-            sensorId != null &&
-            dualAuth.shouldConsumeTimeout(session, sensorId)
-        ) {
+        if (sensorId != null && dualAuth.onAuthenticationTimedOut(chain.thisObject, sensorId)) {
             null
         } else {
-            val result = chain.proceed()
-            if (sensorId != null) {
-                dualAuth.afterAuthenticationTimedOut(session, sensorId)
-            }
-            result
+            chain.proceed()
         }
     }
-
     private val authSessionDialogAnimatedHooker = XposedInterface.Hooker { chain ->
         val session = chain.thisObject
         dualAuth.prepare(session)
@@ -152,29 +147,19 @@ class MainHook : XposedModule() {
         val result = if (
             args.size == 1 &&
             args[0] is Boolean &&
-            dualAuth.shouldDelayFingerprint(session)
+            dualAuth.shouldForceFingerprintStart(session)
         ) {
-            args[0] = false
+            // FACE is already active. Start UDFPS as soon as the prompt is ready
+            // so either modality can become the first factor.
+            args[0] = true
             chain.proceed(args)
         } else {
             chain.proceed()
         }
 
-        // Run only after the framework has moved AuthSession into its
-        // UI-showing state. If FACE already succeeded during the animation,
-        // this is the first safe point to start UDFPS.
         dualAuth.onDialogAnimatedIn(session)
         result
     }
-
-    private val fingerprintStartGateHooker = XposedInterface.Hooker { chain ->
-        if (dualAuth.shouldBlockFingerprintStart(chain.thisObject)) {
-            null
-        } else {
-            chain.proceed()
-        }
-    }
-
     private val authSessionCleanupHooker = XposedInterface.Hooker { chain ->
         try {
             chain.proceed()
@@ -183,6 +168,18 @@ class MainHook : XposedModule() {
         }
     }
 
+    private val systemUiNeutralHelpHooker = XposedInterface.Hooker { chain ->
+        val message = runCatching { chain.getArg(1) as? String }.getOrNull()
+        if (message != null && message.startsWith(DualBiometricCoordinator.NEUTRAL_GUIDANCE_PREFIX)) {
+            promptCollisionGuard.showNeutralGuidance(
+                chain.thisObject,
+                message.removePrefix(DualBiometricCoordinator.NEUTRAL_GUIDANCE_PREFIX),
+            )
+            null
+        } else {
+            chain.proceed()
+        }
+    }
     private val systemUiAuthSuccessHooker = XposedInterface.Hooker { chain ->
         val modality = runCatching { chain.getArg(0) as? Int }.getOrNull()
         val controller = chain.thisObject
@@ -261,7 +258,20 @@ class MainHook : XposedModule() {
                 .setId(HOOK_ID_SYSTEMUI_AUTH_SUCCESS)
                 .intercept(systemUiAuthSuccessHooker)
 
-            logInfo("OK: event-driven SystemUI prompt collision guard")
+            authControllerClass.declaredMethods.firstOrNull {
+                it.name == "onBiometricHelp" &&
+                    it.parameterTypes.size == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == String::class.java
+            }?.let { helpMethod ->
+                helpMethod.isAccessible = true
+                hook(helpMethod)
+                    .setId(HOOK_ID_SYSTEMUI_NEUTRAL_HELP)
+                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                    .intercept(systemUiNeutralHelpHooker)
+            }
+
+            logInfo("OK: neutral dual-auth guidance + prompt collision guard")
         }.onFailure {
             logError("FAIL SystemUI auth-success hook", it)
         }
@@ -356,21 +366,6 @@ class MainHook : XposedModule() {
 
             authSessionClass.declaredMethods
                 .filter {
-                    (it.name == "onStartFingerprint" ||
-                        it.name == "startFingerprintSensorsNow" ||
-                        it.name == "startAllPreparedFingerprintSensors") &&
-                        it.parameterTypes.isEmpty()
-                }
-                .forEach { method ->
-                    method.isAccessible = true
-                    hook(method)
-                        .setId("${HOOK_ID_AUTH_SESSION_FP_GATE}_${method.name}")
-                        .setPriority(XposedInterface.PRIORITY_HIGHEST)
-                        .intercept(fingerprintStartGateHooker)
-                }
-
-            authSessionClass.declaredMethods
-                .filter {
                     it.name == "onDialogDismissed" ||
                         it.name == "onCancelAuthSession" ||
                         it.name == "onClientDied" ||
@@ -383,7 +378,7 @@ class MainHook : XposedModule() {
                         .intercept(authSessionCleanupHooker)
                 }
 
-            logInfo("OK: AuthSession FACE->FINGERPRINT state machine")
+            logInfo("OK: order-independent FACE+FINGERPRINT 2-of-2 state machine")
         }.onFailure {
             logError("FAIL AuthSession dual-biometric hooks", it)
         }
@@ -459,12 +454,12 @@ class MainHook : XposedModule() {
         private const val HOOK_ID_PRE_AUTH_CONTEXT = "hook_pre_auth_context"
         private const val HOOK_ID_FACE_STRENGTH_CHECK = "hook_face_strength_check"
         private const val HOOK_ID_SYSTEMUI_AUTH_SUCCESS = "hook_systemui_auth_success"
+        private const val HOOK_ID_SYSTEMUI_NEUTRAL_HELP = "hook_systemui_neutral_help"
         private const val HOOK_ID_AUTH_SESSION_SUCCESS = "hook_authsession_success"
         private const val HOOK_ID_AUTH_SESSION_ERROR = "hook_authsession_error"
         private const val HOOK_ID_AUTH_SESSION_REJECTED = "hook_authsession_rejected"
         private const val HOOK_ID_AUTH_SESSION_TIMEOUT = "hook_authsession_timeout"
         private const val HOOK_ID_AUTH_SESSION_DIALOG = "hook_authsession_dialog"
-        private const val HOOK_ID_AUTH_SESSION_FP_GATE = "hook_authsession_fp_gate"
         private const val HOOK_ID_AUTH_SESSION_CLEANUP = "hook_authsession_cleanup"
 
         private const val OEM_STRENGTH_MASK = 4095
