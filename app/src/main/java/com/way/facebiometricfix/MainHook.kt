@@ -216,13 +216,7 @@ class MainHook : XposedModule() {
 
     override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
         logInfo("hooking biometrics in system_server ...")
-        runCatching {
-            DualBiometricPolicy.attach(getRemotePreferences(PolicyConfig.PREF_GROUP))
-        }.onSuccess {
-            logInfo("OK: live per-app biometric policy attached")
-        }.onFailure {
-            logError("FAIL remote policy; falling back to ANY", it)
-        }
+        attachRemotePolicy()
         installSystemServerHooks(param.classLoader)
     }
 
@@ -258,7 +252,18 @@ class MainHook : XposedModule() {
         if (isSystemUiProcess) {
             installSystemUiHooks(classLoader)
         } else {
+            attachRemotePolicy()
             installSystemServerHooks(classLoader)
+        }
+    }
+
+    private fun attachRemotePolicy() {
+        runCatching {
+            DualBiometricPolicy.attach(getRemotePreferences(PolicyConfig.PREF_GROUP))
+        }.onSuccess {
+            logInfo("OK: live per-app biometric policy attached")
+        }.onFailure {
+            logError("FAIL remote policy; falling back to ANY", it)
         }
     }
 
