@@ -328,7 +328,7 @@ internal class DualBiometricCoordinator(
 
         val handles = handlesFor(session)
         val packageName = readString(handles.opPackageName, session) ?: return null
-        if (DualBiometricPolicy.modeFor(packageName) != BiometricPolicyMode.FACE_THEN_FINGERPRINT) {
+        if (DualBiometricPolicy.modeFor(packageName) != BiometricPolicyMode.FACE_AND_FINGERPRINT) {
             return null
         }
 
