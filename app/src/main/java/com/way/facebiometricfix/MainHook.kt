@@ -1,7 +1,12 @@
 package com.way.facebiometricfix
 
+import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
@@ -73,14 +78,11 @@ class MainHook : XposedModule() {
      */
     private val systemUiAuthSuccessHooker = XposedInterface.Hooker { chain ->
         val modality = runCatching { chain.getArg(0) as? Int }.getOrNull()
+        val authController = chain.thisObject
         val result = chain.proceed()
 
         if (modality == FACE_MODALITY) {
-            runCatching {
-                hideUdfpsOverlayFromAuthController(chain.thisObject)
-            }.onFailure {
-                logError("FAIL: hide UDFPS overlay after face auth", it)
-            }
+            schedulePostFaceCleanup(authController)
         }
 
         result
@@ -270,6 +272,225 @@ class MainHook : XposedModule() {
                 logError("FAIL combined prompt-state cleanup hook", it)
             }
         }
+    }
+
+    private fun schedulePostFaceCleanup(authController: Any?) {
+        val handler = Handler(Looper.getMainLooper())
+        POST_FACE_CLEANUP_DELAYS_MS.forEach { delay ->
+            handler.postDelayed({
+                runCatching {
+                    // Pass 1: remove a real UDFPS overlay if ColorOS re-created it
+                    // after AuthController#onBiometricAuthenticated returned.
+                    hideUdfpsOverlayFromAuthController(authController)
+
+                    // Pass 2: inspect the actual current BiometricPrompt tree. This
+                    // does not depend on vendor class names and also provides the
+                    // runtime class/resource evidence needed if ColorOS moved the
+                    // icon into an OEM view.
+                    cleanupCurrentPromptByGeometry(authController, delay)
+                }.onFailure {
+                    logError("FAIL post-face cleanup at ${delay}ms", it)
+                }
+            }, delay)
+        }
+    }
+
+    private fun cleanupCurrentPromptByGeometry(authController: Any?, delayMs: Long) {
+        val root = findCurrentDialogView(authController) ?: run {
+            logWarn("PROBE[${delayMs}ms]: current BiometricPrompt view not found")
+            return
+        }
+
+        val visibleViews = mutableListOf<View>()
+        collectVisibleViews(root, visibleViews)
+
+        val confirm = visibleViews.firstOrNull { isLikelyConfirmationView(it) } ?: run {
+            logWarn(
+                "PROBE[${delayMs}ms]: confirmation view not found; root=" +
+                    root.javaClass.name
+            )
+            dumpPromptViews(visibleViews, delayMs, null)
+            return
+        }
+
+        val confirmRect = Rect()
+        if (!confirm.getGlobalVisibleRect(confirmRect) || confirmRect.isEmpty) {
+            logWarn("PROBE[${delayMs}ms]: confirmation view has no visible rect")
+            return
+        }
+
+        val candidates = visibleViews.filter { view ->
+            view !== confirm &&
+                view.visibility == View.VISIBLE &&
+                view.alpha > 0f &&
+                isLikelyBiometricIcon(view) &&
+                overlapRatio(view, confirmRect) >= MIN_CONFIRM_OVERLAP_RATIO
+        }
+
+        dumpPromptViews(visibleViews, delayMs, confirm)
+
+        if (candidates.isEmpty()) {
+            logWarn(
+                "PROBE[${delayMs}ms]: no overlapping biometric candidate; " +
+                    "confirm=${describeView(confirm)}"
+            )
+            return
+        }
+
+        candidates.forEach { view ->
+            logInfo(
+                "FIX[${delayMs}ms]: hiding overlapping biometric view " +
+                    describeView(view)
+            )
+            view.visibility = View.INVISIBLE
+            view.isClickable = false
+        }
+    }
+
+    private fun findCurrentDialogView(authController: Any?): View? {
+        if (authController == null) return null
+
+        var type: Class<*>? = authController.javaClass
+        while (type != null) {
+            val fields = type.declaredFields
+
+            fields.firstOrNull { it.name == "mCurrentDialog" }?.let { field ->
+                val value = runCatching {
+                    field.isAccessible = true
+                    field.get(authController)
+                }.getOrNull()
+                if (value is View) return value
+            }
+
+            for (field in fields) {
+                val value = runCatching {
+                    field.isAccessible = true
+                    field.get(authController)
+                }.getOrNull()
+                if (value is View) {
+                    val className = value.javaClass.name
+                    if (
+                        className.contains("AuthContainer", ignoreCase = true) ||
+                        className.contains("Biometric", ignoreCase = true)
+                    ) {
+                        return value
+                    }
+                }
+            }
+
+            type = type.superclass
+        }
+        return null
+    }
+
+    private fun collectVisibleViews(root: View, out: MutableList<View>) {
+        if (root.visibility != View.VISIBLE || root.alpha <= 0f) return
+        out.add(root)
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                collectVisibleViews(root.getChildAt(i), out)
+            }
+        }
+    }
+
+    private fun isLikelyConfirmationView(view: View): Boolean {
+        val resource = resourceEntryName(view)
+        val text = (view as? TextView)?.text?.toString().orEmpty()
+        val className = view.javaClass.name
+
+        return (
+            resource.contains("confirm", ignoreCase = true) ||
+                resource.contains("positive", ignoreCase = true) ||
+                resource.contains("continue", ignoreCase = true) ||
+                text.equals("继续", ignoreCase = true) ||
+                text.equals("确认", ignoreCase = true) ||
+                text.equals("Continue", ignoreCase = true) ||
+                text.equals("Confirm", ignoreCase = true) ||
+                className.contains("Button", ignoreCase = true) &&
+                (text.contains("继续") || text.contains("确认"))
+            ) &&
+            view.visibility == View.VISIBLE &&
+            view.isEnabled
+    }
+
+    private fun isLikelyBiometricIcon(view: View): Boolean {
+        val resource = resourceEntryName(view)
+        val className = view.javaClass.name
+        val haystack = "$resource $className".lowercase()
+
+        if (
+            haystack.contains("finger") ||
+            haystack.contains("udfps") ||
+            haystack.contains("biometric") ||
+            haystack.contains("icon")
+        ) {
+            return true
+        }
+
+        // OEM fallback: the offending control in ColorOS is a compact,
+        // approximately square affordance sitting over the confirmation button.
+        val w = view.width
+        val h = view.height
+        return w in MIN_OEM_ICON_PX..MAX_OEM_ICON_PX &&
+            h in MIN_OEM_ICON_PX..MAX_OEM_ICON_PX &&
+            kotlin.math.abs(w - h) <= OEM_ICON_SQUARE_TOLERANCE_PX
+    }
+
+    private fun overlapRatio(view: View, target: Rect): Float {
+        val rect = Rect()
+        if (!view.getGlobalVisibleRect(rect) || rect.isEmpty) return 0f
+
+        val intersection = Rect(rect)
+        if (!intersection.intersect(target)) return 0f
+
+        val area = rect.width().toLong() * rect.height().toLong()
+        if (area <= 0L) return 0f
+
+        val overlap = intersection.width().toLong() * intersection.height().toLong()
+        return overlap.toFloat() / area.toFloat()
+    }
+
+    private fun dumpPromptViews(views: List<View>, delayMs: Long, confirm: View?) {
+        logInfo(
+            "PROBE[${delayMs}ms]: root tree visibleViews=${views.size}" +
+                if (confirm != null) " confirm=${describeView(confirm)}" else ""
+        )
+
+        views
+            .filter { view ->
+                val name = resourceEntryName(view)
+                val cls = view.javaClass.name
+                val text = (view as? TextView)?.text?.toString().orEmpty()
+                name.isNotBlank() ||
+                    cls.contains("Biometric", true) ||
+                    cls.contains("Fingerprint", true) ||
+                    cls.contains("Udfps", true) ||
+                    cls.contains("Button", true) ||
+                    text.isNotBlank()
+            }
+            .take(MAX_PROBE_LINES)
+            .forEach { logInfo("PROBE[${delayMs}ms]: ${describeView(it)}") }
+    }
+
+    private fun describeView(view: View): String {
+        val rect = Rect()
+        view.getGlobalVisibleRect(rect)
+        val text = (view as? TextView)?.text?.toString()
+            ?.replace("\n", " ")
+            ?.take(40)
+            .orEmpty()
+
+        return "class=${view.javaClass.name} id=${resourceEntryName(view)} " +
+            "rect=[${rect.left},${rect.top},${rect.right},${rect.bottom}] " +
+            "size=${view.width}x${view.height} vis=${view.visibility} " +
+            "enabled=${view.isEnabled} clickable=${view.isClickable} " +
+            "alpha=${view.alpha} text=${text}"
+    }
+
+    private fun resourceEntryName(view: View): String {
+        if (view.id == View.NO_ID) return ""
+        return runCatching { view.resources.getResourceEntryName(view.id) }
+            .getOrDefault("")
     }
 
     private fun hideRedundantCombinedPromptIcon(authViewObject: Any?) {
@@ -502,6 +723,13 @@ class MainHook : XposedModule() {
         private const val WEAK_AUTHENTICATORS = 255
         private const val FACE_MODALITY = 8
         private const val STATE_PENDING_CONFIRMATION = 5
+
+        private val POST_FACE_CLEANUP_DELAYS_MS = longArrayOf(0L, 80L, 180L, 360L)
+        private const val MIN_CONFIRM_OVERLAP_RATIO = 0.18f
+        private const val MIN_OEM_ICON_PX = 48
+        private const val MAX_OEM_ICON_PX = 280
+        private const val OEM_ICON_SQUARE_TOLERANCE_PX = 72
+        private const val MAX_PROBE_LINES = 80
 
         private val APP_PRE_AUTH_PACKAGE = ThreadLocal<String>()
 
