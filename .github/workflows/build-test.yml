@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/coloros-udfps-overlay
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
