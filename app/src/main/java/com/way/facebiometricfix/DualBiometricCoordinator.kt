@@ -48,6 +48,7 @@ internal class DualBiometricCoordinator(
         val sensorIdToModality: Method?,
         val onStartFingerprint: Method?,
         val startFingerprintSensorsNow: Method?,
+        val startAllPreparedFingerprintSensors: Method?,
         val statusBarService: Field?,
     )
 
@@ -299,6 +300,11 @@ internal class DualBiometricCoordinator(
                     true
                 }
 
+                handles.startAllPreparedFingerprintSensors != null -> {
+                    handles.startAllPreparedFingerprintSensors.invoke(session)
+                    true
+                }
+
                 else -> false
             }
         }.onFailure {
@@ -371,6 +377,10 @@ internal class DualBiometricCoordinator(
                 startFingerprintSensorsNow = findMethod(type, "startFingerprintSensorsNow") {
                     it.parameterTypes.isEmpty()
                 },
+                startAllPreparedFingerprintSensors =
+                    findMethod(type, "startAllPreparedFingerprintSensors") {
+                        it.parameterTypes.isEmpty()
+                    },
                 statusBarService = findField(type, "mStatusBarService"),
             )
             cachedHandles = handles
