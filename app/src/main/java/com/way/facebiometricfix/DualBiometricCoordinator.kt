@@ -2,7 +2,6 @@ package com.way.facebiometricfix
 
 import java.lang.reflect.Field
 import java.lang.reflect.Method
-import java.util.Collections
 import java.util.Locale
 import java.util.WeakHashMap
 
@@ -52,7 +51,7 @@ internal class DualBiometricCoordinator(
         val statusBarService: Field?,
     )
 
-    private val sessions = Collections.synchronizedMap(WeakHashMap<Any, SessionState>())
+    private val sessions = WeakHashMap<Any, SessionState>()
 
     @Volatile
     private var cachedHandles: Handles? = null
