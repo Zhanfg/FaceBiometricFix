@@ -35,7 +35,7 @@ jobs:
       - name: Ensure Android SDK components
         run: |
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Read version and detect version change
         id: version
