@@ -16,15 +16,33 @@ class PolicyStore(
         PolicyConfig.parse(local.getString(PolicyConfig.keyFor(packageName), null))
 
     fun setMode(packageName: String, mode: BiometricPolicyMode) {
-        val key = PolicyConfig.keyFor(packageName)
+        setModes(setOf(packageName), mode)
+    }
+
+    fun setModes(packageNames: Collection<String>, mode: BiometricPolicyMode) {
+        if (packageNames.isEmpty()) return
 
         local.edit().apply {
-            if (mode == BiometricPolicyMode.ANY) remove(key) else putString(key, mode.name)
+            packageNames.forEach { packageName ->
+                val key = PolicyConfig.keyFor(packageName)
+                if (mode == BiometricPolicyMode.ANY) {
+                    remove(key)
+                } else {
+                    putString(key, mode.name)
+                }
+            }
         }.apply()
 
         runCatching {
             remoteProvider()?.edit()?.apply {
-                if (mode == BiometricPolicyMode.ANY) remove(key) else putString(key, mode.name)
+                packageNames.forEach { packageName ->
+                    val key = PolicyConfig.keyFor(packageName)
+                    if (mode == BiometricPolicyMode.ANY) {
+                        remove(key)
+                    } else {
+                        putString(key, mode.name)
+                    }
+                }
             }?.apply()
         }
     }
